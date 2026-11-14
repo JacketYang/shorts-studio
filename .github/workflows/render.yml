@@ -26,6 +26,9 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
+      - name: Install Python render deps
+        run: pip3 install --no-cache-dir numpy Pillow
+
       - name: Claim & Render Batch
         env:
           WORKER_TOKEN: ${{ secrets.WORKER_TOKEN }}

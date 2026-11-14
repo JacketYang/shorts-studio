@@ -102,7 +102,7 @@ async function ensureRenderedMp4(
     const melody = melodies.find((m) => m.id === melId);
     fs.writeFileSync(specFile, JSON.stringify({ spec, melody }), 'utf8');
     await execFileAsync('python3', [path.resolve(process.cwd(), 'workers/render/render_worker.py'), specFile, mp4File], {
-      timeout: 60_000,
+      timeout: 240_000,
     });
     if (storageConfig.driver !== 'local') {
       try {
