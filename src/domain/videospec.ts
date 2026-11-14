@@ -122,6 +122,19 @@ export const VideoSpecSchema = z.object({
           shake: z.number().min(0).max(1),
         })
         .optional(),
+      // T3 视觉反馈强度。level 是总开关预设，具体字段缺省时按 level 取值，
+      // 显式写了就覆盖预设。全部可省略，默认 level=2。
+      fx: z
+        .object({
+          level: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]).optional(),
+          flash: z.number().min(0).max(1).optional(),
+          ripple: z.number().min(0).max(1).optional(),
+          particles: z.number().min(0).max(1).optional(),
+          shake: z.number().min(0).max(1).optional(),
+          pop: z.number().min(0).max(1).optional(),
+          vignette: z.number().min(0).max(1).optional(),
+        })
+        .optional(),
     }),
     params: z.record(z.string(), z.unknown()),
   }),

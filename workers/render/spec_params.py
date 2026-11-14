@@ -162,6 +162,8 @@ class StyleParams:
     background: BackgroundParams = field(default_factory=BackgroundParams)
     trail: TrailParams = field(default_factory=TrailParams)
     camera: CameraParams = field(default_factory=CameraParams)
+    # T3：原样保留 fx 字典，具体预设解析交给 fx.parse_fx（避免两处维护预设表）
+    fx: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -330,6 +332,9 @@ def load_params(spec: dict) -> SpecParams:
         zoom_to=clamp(cam_raw.get("zoom_to", cam_def.get("zoom_to", 1.0)), 0.5, 2.5),
         shake=clamp(cam_raw.get("shake", cam_def.get("shake", 0.0)), 0.0, 1.0),
     )
+
+    fx_raw = style_raw.get("fx")
+    p.style.fx = fx_raw if isinstance(fx_raw, dict) else {}
 
     pal = _dig(style_raw, "palette", "colors")
     if isinstance(pal, list) and pal:

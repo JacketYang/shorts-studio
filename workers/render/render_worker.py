@@ -22,6 +22,7 @@ if _WORKER_DIR not in sys.path:
 
 import numpy as np  # noqa: E402
 
+import fx as fxmod  # noqa: E402
 import gfx  # noqa: E402
 import spec_params  # noqa: E402
 from spec_params import (  # noqa: E402
@@ -216,19 +217,49 @@ class FrameComposer:
 
     def __init__(self, h: int, w: int):
         self.out_f = np.empty((h, w, 3), dtype=np.float32)
+        self.shift_tmp = np.empty((h, w, 3), dtype=np.float32)
         self.out_u8 = np.empty((h, w, 3), dtype=np.uint8)
         self.w = w
         self.h = h
 
-    def compose(self, fb: np.ndarray, trail_buf: np.ndarray | None) -> bytes:
+    def compose(
+        self,
+        fb: np.ndarray,
+        trail_buf: np.ndarray | None,
+        shift: tuple = (0.0, 0.0),
+        bg: np.ndarray | None = None,
+    ) -> bytes:
+        """合成输出帧。shift 非零时整体平移，空出的边缘用背景色填充。"""
         np.copyto(self.out_f, fb)
         if trail_buf is not None:
             self.out_f += trail_buf
+
+        dx, dy = shift
+        if abs(dx) >= 0.5 or abs(dy) >= 0.5:
+            self._shift(self.out_f, int(round(dx)), int(round(dy)), bg)
+
         # 过曝保护：每帧只做一次，保留密集区域的色相而不是糊成死白
         gfx.soften_highlights(self.out_f)
         np.clip(self.out_f, 0.0, 255.0, out=self.out_f)
         np.copyto(self.out_u8, self.out_f, casting="unsafe")
         return self.out_u8.tobytes()
+
+    def _shift(self, buf: np.ndarray, dx: int, dy: int, bg: np.ndarray | None) -> None:
+        """整体平移 buf，(dx, dy)；空出的边缘用背景色填充。"""
+        h, w = buf.shape[0], buf.shape[1]
+        sx = max(0, min(w, dx))
+        sy = max(0, min(h, dy))
+
+        np.copyto(self.shift_tmp, buf)
+        tmp = self.shift_tmp
+        # 先用背景铺满
+        if bg is not None:
+            np.copyto(buf, bg)
+        else:
+            buf.fill(0.0)
+
+        if sx < w and sy < h and (w - sx) > 0 and (h - sy) > 0:
+            buf[sy:h, sx:w] = tmp[0:h - sy, 0:w - sx]
 
 
 def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess.Popen):
@@ -268,6 +299,12 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
     trail_buf = TrailBuffer(H, W)
 
     cam = P.style.camera
+
+    # T3：视觉反馈系统（粒子/涟漪/闪光/震屏）。level=0 时全为空操作。
+    fx_cfg = fxmod.parse_fx(P.style.fx)
+    fx_rng = derive_rng(P.seed, "fx")
+    fx_sys = fxmod.FxSystem(fx_cfg, fx_rng, W, H)
+
     composer = FrameComposer(H, W)
     work_frame = np.empty((H, W, 3), dtype=np.float32)
     events = []
@@ -336,6 +373,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     if trigger:
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.78})
                         note_idx += 1
+                        # T3: 过中线 0.5；本帧所有摆同时过零视为"全体对齐" 1.0
+                        fx_sys.spawn(t, sx_pre, sy_pre, 0.5, col, palette=accent_rgbs)
                 prev_thetas[i] = theta
 
                 l0 = zoom_at(z, pivot_x, pivot_y)
@@ -343,13 +382,21 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 gfx.draw_line_aa(fb, l0[0], l0[1], l1[0], l1[1], 1.0, (100, 116, 139))
 
                 sx, sy = zoom_at(z, raw_x, raw_y)
+                sx_pre, sy_pre = sx, sy
                 sr = bob_r * z
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
-                draw_ball(fb, sx, sy, sr, col, z)
+                draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("pend", i), t), col, z)
 
-            gfx.apply_vignette(fb, VIGNETTE_STRENGTH)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None))
+            # T3 视觉反馈：推进生命周期 → 叠加各层效果
+            fx_sys.update(t, dt)
+            fx_sys.apply_background_flash(fb)
+            fx_sys.draw_ripples(fb, t)
+            fx_sys.draw_particles(fb, t)
+            gfx.apply_vignette(fb, fx_cfg.vignette)
+            _dx, _dy = fx_sys.shake_offset(t)
+            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
+                                              shift=(_dx, _dy), bg=bg_cache))
 
     # =====================================================================
     # orbit-sync
@@ -401,19 +448,29 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     if prev_k != curr_k:
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.82})
                         note_idx += 1
+                        # T3: 过光束 0.6
+                        fx_sys.spawn(t, ox_pre, oy_pre, 0.6, col, palette=accent_rgbs)
                 prev_angles[i] = angle
 
                 raw_x = cx + math.cos(angle) * ring_r
                 raw_y = cy + math.sin(angle) * ring_r
                 sx, sy = zoom_at(z, raw_x, raw_y)
+                ox_pre, oy_pre = sx, sy
                 sr = planet_r * z
 
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
-                draw_ball(fb, sx, sy, sr, col, z)
+                draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("planet", i), t), col, z)
 
-            gfx.apply_vignette(fb, VIGNETTE_STRENGTH)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None))
+            # T3 视觉反馈：推进生命周期 → 叠加各层效果
+            fx_sys.update(t, dt)
+            fx_sys.apply_background_flash(fb)
+            fx_sys.draw_ripples(fb, t)
+            fx_sys.draw_particles(fb, t)
+            gfx.apply_vignette(fb, fx_cfg.vignette)
+            _dx, _dy = fx_sys.shake_offset(t)
+            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
+                                              shift=(_dx, _dy), bg=bg_cache))
 
     # =====================================================================
     # ball-sort
@@ -541,6 +598,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                                 b_obj["vy"] -= 1.65 * dot * ny
                                 events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.65})
                                 note_idx += 1
+                                # T3: 钉子碰撞 0.4
+                                px_s, py_s = zoom_at(z, px * W, py * H)
+                                fx_sys.spawn(t, px_s, py_s, 0.4,
+                                             bin_rgbs[b_obj["cidx"] % len(bin_rgbs)],
+                                             palette=bin_rgbs)
 
                     if b_obj["y"] > 0.72:
                         target_x = (bin_left + (b_obj["cidx"] + 0.5) * bin_w) / W
@@ -556,16 +618,30 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         b_obj["y"] = settle_y + 0.01 - (stack_idx // 3) * 0.024
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.95})
                         note_idx += 1
+                        # T3: 入桶 0.9；整桶满（该桶第 5 个）额外 1.0
+                        bx_s, by_s = zoom_at(z, b_obj["x"] * W, b_obj["y"] * H)
+                        _bcol = bin_rgbs[b_obj["cidx"] % len(bin_rgbs)]
+                        fx_sys.spawn(t, bx_s, by_s, 0.9, _bcol, palette=bin_rgbs,
+                                     ball_key=("bin", b_obj["cidx"]))
+                        if bin_counts[slot] % 5 == 0:
+                            fx_sys.spawn(t, bx_s, by_s, 1.0, _bcol, palette=bin_rgbs)
 
                 sx, sy = zoom_at(z, b_obj["x"] * W, b_obj["y"] * H)
                 sr = ball_r * z
                 col = bin_rgbs[b_obj["cidx"] % len(bin_rgbs)]
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
-                draw_ball(fb, sx, sy, sr, col, z)
+                draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("bin", b_obj["cidx"]), t), col, z)
 
-            gfx.apply_vignette(fb, VIGNETTE_STRENGTH)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None))
+            # T3 视觉反馈：推进生命周期 → 叠加各层效果
+            fx_sys.update(t, dt)
+            fx_sys.apply_background_flash(fb)
+            fx_sys.draw_ripples(fb, t)
+            fx_sys.draw_particles(fb, t)
+            gfx.apply_vignette(fb, fx_cfg.vignette)
+            _dx, _dy = fx_sys.shake_offset(t)
+            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
+                                              shift=(_dx, _dy), bg=bg_cache))
 
     # =====================================================================
     # melody-bounce（默认分支）
@@ -622,6 +698,18 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             cur_r = arena_r * (max(0.62, 1.0 - bounce_count * 0.008) if rl.type == "shrink_wall" else 1.0)
             scx, scy = zoom_at(z, cx, cy)
             if sides == 0:
+                # T3 墙体点亮：按 24 段分别绘制，命中的段加亮并加粗
+                for _seg in range(fxmod.WALL_SEGMENTS):
+                    _a0 = 2 * math.pi * _seg / fxmod.WALL_SEGMENTS
+                    _a1 = 2 * math.pi * (_seg + 1) / fxmod.WALL_SEGMENTS
+                    _boost = fx_sys.wall_boost(_seg, t)
+                    if _boost is None:
+                        continue
+                    _bright, _bcol = _boost
+                    _col = tuple(min(255, int(c * (0.45 + 0.55 * _bright))) for c in _bcol)
+                    _t0 = zoom_at(z, cx + cur_r * math.cos(_a0), cy + cur_r * math.sin(_a0))
+                    _t1 = zoom_at(z, cx + cur_r * math.cos(_a1), cy + cur_r * math.sin(_a1))
+                    gfx.draw_line_aa(fb, _t0[0], _t0[1], _t1[0], _t1[1], wall_px * 3, _col)
                 gfx.draw_ring_aa(fb, scx, scy, cur_r * z, wall_px * z, wall_color)
             else:
                 pts = [
@@ -633,6 +721,12 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 for i in range(sides):
                     p0 = pts[i]
                     p1 = pts[(i + 1) % sides]
+                    # T3 墙体点亮：命中的边加亮并加粗
+                    _boost = fx_sys.wall_boost(i, t)
+                    if _boost is not None:
+                        _bright, _bcol = _boost
+                        _col = tuple(min(255, int(c * (0.45 + 0.55 * _bright))) for c in _bcol)
+                        gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], wall_px * 3, _col)
                     gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], wall_px, wall_color)
 
             new_balls = []
@@ -679,15 +773,43 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.9})
                         note_idx += 1
 
+                        # T3: 碰墙 0.6，分裂 1.0，每第 8 次碰撞额外 +0.2
+                        _fx_i = 0.6
+                        if rl.type == "split_on_bounce" and (
+                                (bounce_count - 1) % rl.every_n_bounces == 0):
+                            _fx_i = 1.0
+                        if bounce_count % 8 == 0:
+                            _fx_i = min(1.0, _fx_i + 0.2)
+                        # 撞墙点：球心到墙的交点
+                        _wx = cx + (b["x"] - cx) / max(1e-6, dist) * cur_r
+                        _wy = cy + (b["y"] - cy) / max(1e-6, dist) * cur_r
+                        _wsx, _wsy = zoom_at(z, _wx, _wy)
+                        # 墙段：多边形按边，圆形按 24 段
+                        if sides > 0:
+                            _ang = math.atan2(_wy - cy, _wx - cx) - angle_rad
+                            _seg = int(round((_ang % (2 * math.pi)) / (2 * math.pi) * sides)) % sides
+                        else:
+                            _ang = math.atan2(_wy - cy, _wx - cx)
+                            _seg = int(round((_ang % (2 * math.pi)) / (2 * math.pi) * fxmod.WALL_SEGMENTS)) % fxmod.WALL_SEGMENTS
+                        fx_sys.spawn(t, _wsx, _wsy, _fx_i, b["color"],
+                                     palette=accent_rgbs, wall_seg=_seg, ball_key=("ball", id(b)))
+
                 sbx, sby = zoom_at(z, b["x"], b["y"])
                 sr = b["r"] * z
                 if trail_on:
                     trail_buf.stamp(sbx, sby, sr * GLOW_RADIUS_FACTOR, b["color"], GLOW_STRENGTH)
-                draw_ball(fb, sbx, sby, sr, b["color"], z)
+                draw_ball(fb, sbx, sby, sr * fx_sys.pop_scale(("ball", id(b)), t), b["color"], z)
 
             balls.extend(new_balls)
-            gfx.apply_vignette(fb, VIGNETTE_STRENGTH)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None))
+            # T3 视觉反馈：推进生命周期 → 叠加各层效果
+            fx_sys.update(t, dt)
+            fx_sys.apply_background_flash(fb)
+            fx_sys.draw_ripples(fb, t)
+            fx_sys.draw_particles(fb, t)
+            gfx.apply_vignette(fb, fx_cfg.vignette)
+            _dx, _dy = fx_sys.shake_offset(t)
+            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
+                                              shift=(_dx, _dy), bg=bg_cache))
 
     return events
 

@@ -80,6 +80,16 @@ export interface VideoSpec {
         zoom_to: number;
         shake: number;
       };
+      /** T3 视觉反馈强度；level 为预设总开关，显式字段覆盖预设 */
+      fx?: {
+        level?: 0 | 1 | 2 | 3;
+        flash?: number;
+        ripple?: number;
+        particles?: number;
+        shake?: number;
+        pop?: number;
+        vignette?: number;
+      };
     };
     params: Record<string, unknown>;
   };
