@@ -3,6 +3,7 @@ import { Activity, CheckCircle2, Copy, KeyRound, RefreshCw, Server, Unlink, XCir
 import type { StorageDriver, StorageStatusSummary } from '../domain/types';
 import type { StudioState } from '../types/ui';
 import { AiSettingsCard } from './settings/AiSettingsCard';
+import { SecretsCard } from './settings/SecretsCard';
 import { ChannelAccountCard } from './settings/ChannelAccountCard';
 import { StorageSettingsCard } from './settings/StorageSettingsCard';
 
@@ -124,25 +125,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, on
     .filter((a) => a.created_at.startsWith(monthPrefix))
     .reduce((sum, a) => sum + a.cost_usd, 0);
 
-  const envItems: Array<{ key: string; label: string; ok: boolean; hint: string }> = [
-    { key: 'GEMINI_API_KEY', label: 'Gemini API Key', ok: state.env_status.gemini_key, hint: '原生 Gemini 协议' },
-    { key: 'CUSTOM_AI_API_KEY', label: 'OpenAI/代理 Key', ok: state.env_status.custom_ai_key, hint: 'OpenAI 兼容接口' },
-    { key: 'ANTHROPIC_API_KEY', label: 'Anthropic Key', ok: state.env_status.anthropic_key, hint: 'Claude 原生协议' },
-    { key: 'YOUTUBE_API_KEY', label: 'YouTube API v3', ok: state.env_status.youtube_api_key, hint: '公开数据与参考查询' },
-    {
-      key: 'GOOGLE_OAUTH_CLIENT',
-      label: 'OAuth Client ID/Secret',
-      ok: state.env_status.google_client_id && state.env_status.google_client_secret,
-      hint: '全频道共用 1 套 GCP 应用',
-    },
-    {
-      key: previewStorageDriver === 'webdav' ? 'WEBDAV_CREDENTIALS' : 'STORAGE_S3_KEYS',
-      label: previewStorageDriver === 'webdav' ? 'WebDAV 账号密码' : 'S3 / R2 密钥对',
-      ok: previewStorageDriver === 'webdav' ? state.env_status.webdav_credentials : state.env_status.s3_credentials,
-      hint: previewStorageDriver === 'local' ? '本地目录免密钥' : '云端对象存储选配',
-    },
-  ];
-
   return (
     <div className="space-y-6">
       {/* Real YouTube OAuth Connection Card */}
@@ -247,46 +229,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, on
         )}
       </div>
 
-      {/* Streamlined Platform Env Status (Read-Only Security Boundary) */}
-      <div className="rounded-lg border border-slate-200 bg-white p-6 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <div className="flex items-center gap-2 text-base font-semibold text-slate-900">
-              <Server className="h-4 w-4 text-slate-500" />
-              服务端平台密钥注入状态（只读）
-            </div>
-            <p className="mt-1 text-xs text-slate-500">
-              受运行平台安全规范约束，原始 API Key / Client Secret / 存储密钥统一通过运行环境 Secrets 或 `.env` 在服务端安全代理调用（不开放网页明文表单），其余接口地址、模型、思考档位、存储路径、多频道账号均可在下方页面直接增删保存。
-            </p>
-          </div>
-          <span className="font-mono text-xs text-slate-500">详见 docs/SETUP_AND_CREDENTIALS.md</span>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
-          {envItems.map((item) => (
-            <div key={item.key} className="flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-3 py-2.5">
-              <div className="min-w-0">
-                <div className="font-mono font-semibold text-slate-900 truncate">{item.key}</div>
-                <div className="text-[11px] text-slate-500 truncate">{item.label} · {item.hint}</div>
-              </div>
-              <span
-                className={`ml-2 inline-flex items-center gap-1 font-mono font-medium whitespace-nowrap shrink-0 ${
-                  item.ok ? 'text-emerald-700' : 'text-amber-700'
-                }`}
-              >
-                {item.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                {item.ok ? '已注入' : '未配置'}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* 平台凭据管理（全部可在后台填写保存） */}
+      <SecretsCard secrets={state.secrets ?? []} onRefresh={onRefresh} />
 
       {/* Modular Settings Cards */}
       <AiSettingsCard
         aiConfig={state.ai_config}
         defaultAiConfig={state.default_ai_config}
-        secrets={state.secrets}
         busy={busy}
         setBusy={setBusy}
         onRefresh={onRefresh}
