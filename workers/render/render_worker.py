@@ -23,6 +23,7 @@ if _WORKER_DIR not in sys.path:
 import numpy as np  # noqa: E402
 
 import arc as arcmod  # noqa: E402
+import audio as audiomod  # noqa: E402
 import fx as fxmod  # noqa: E402
 import gfx  # noqa: E402
 import text_layer as textmod  # noqa: E402
@@ -291,14 +292,19 @@ class FrameComposer:
             buf[sy:h, sx:w] = tmp[0:h - sy, 0:w - sx]
 
 
-def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float) -> bool:
+def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float,
+                x: float = None) -> bool:
     """T5：drop preset 的蓄力静默窗内抑制所有音频事件。
 
     返回 True 表示已写入。物理与事件时刻不受影响，只是"不发声"。
+    T7：附带 x 位置供声像使用（缺省视为画面中心）。
     """
     if arcmod.is_drop_silence(spec, t):
         return False
-    events.append({"t": t, "midi": midi, "intensity": intensity})
+    ev = {"t": t, "midi": midi, "intensity": intensity}
+    if x is not None:
+        ev["x"] = x
+    events.append(ev)
     return True
 
 
@@ -1175,6 +1181,10 @@ def render_mp4(payload_path: str, output_mp4: str):
     width = int(spec["format"]["width"])
     height = int(spec["format"]["height"])
 
+    # T7：音频合成所需的 seed 与强度曲线
+    P_audio_seed = int(((spec.get("scene") or {}).get("seed")) or 1)
+    arc_cfg_for_audio = arcmod.parse_arc(spec)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_mp4 = os.path.join(tmpdir, "video_only.mp4")
         wav_path = os.path.join(tmpdir, "audio.wav")
@@ -1207,7 +1217,9 @@ def render_mp4(payload_path: str, output_mp4: str):
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg video render failed: {v_err.decode('utf-8', errors='ignore')[:400]}")
 
-        synthesize_wav(wav_path, duration, events)
+        # T7：改为 numpy 向量化立体声合成
+        audiomod.render_audio(wav_path, spec, events, duration,
+                              seed=P_audio_seed, arc_cfg=arc_cfg_for_audio)
 
         mux_cmd = [
             "ffmpeg",
