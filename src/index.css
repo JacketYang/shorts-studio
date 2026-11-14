@@ -11,6 +11,18 @@
     font-family: var(--font-sans);
     color: #0f172a;
     background-color: #f8fafc;
+    /* 基准字号 16px；正文 14→15 由下面统一提升 */
+    font-size: 16px;
+    /* 恢复次像素渲染，小字更实、不发虚 */
+    -webkit-font-smoothing: auto;
+    -moz-osx-font-smoothing: auto;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 中文优先用系统黑体，避免 fallback 到衬线造成「糊」的观感 */
+  body {
+    font-family: var(--font-sans);
+    font-feature-settings: "kern" 1;
   }
 
   h1, h2, h3, .font-display {
@@ -25,3 +37,15 @@
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * 全局字号微调：14 → 15 像素，小字整体 +1px。
+ * 目标是「看起来更清楚」而不是「变大」，所以只动最小档位。
+ */
+/* 用 !important + 位于末尾，确保在 Tailwind utilities 之后生效 */
+.text-\[10px\] { font-size: 11px !important; line-height: 1.45 !important; }
+.text-\[11px\] { font-size: 12px !important; line-height: 1.5 !important; }
+.text-\[13px\] { font-size: 14px !important; line-height: 1.5 !important; }
+.text-xs { font-size: 13.5px !important; line-height: 1.55 !important; }
+.text-sm { font-size: 15px !important; line-height: 1.55 !important; }
+.text-base { font-size: 16.5px !important; line-height: 1.6 !important; }
