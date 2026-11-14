@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, KeyRound, Loader2, Save, Trash2, XCircle } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronUp, KeyRound, Loader2, Save, Trash2, XCircle } from 'lucide-react';
 
 export interface SecretItem {
   key: string;
@@ -45,6 +45,9 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, onRefresh }) 
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [showPlain, setShowPlain] = useState<Record<string, boolean>>({});
+  // 默认收起：只显示「已配置/未配置」概览，点开才出现输入框，避免整页堆满方框
+  const [expanded, setExpanded] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
 
   const byKey = useMemo(() => {
     const m = new Map<string, SecretItem>();
@@ -114,9 +117,9 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, onRefresh }) 
   };
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-6 space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
+    <div className="rounded-lg border border-slate-200 bg-white p-5 space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
           <div className="flex items-center gap-2 text-base font-semibold text-slate-900">
             <KeyRound className="h-4 w-4 text-slate-500" />
             平台凭据管理
@@ -125,10 +128,46 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, onRefresh }) 
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            所有 Key / Secret 均可在此填写并保存在服务端数据库，<strong className="font-semibold text-slate-700">保存后立即生效，无需重启或改 .env</strong>。
-            明文不会回显到页面，也不会出现在「导出备份」中。
+            保存在服务端数据库，<strong className="font-semibold text-slate-700">保存即生效，无需改 .env</strong>；明文不回显、也不进导出备份。
           </p>
         </div>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+        >
+          {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          {expanded ? '收起' : '展开编辑'}
+        </button>
+      </div>
+
+      {/* 收起态：紧凑徽章概览 */}
+      {!expanded && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 text-xs">
+          {secrets.map((item) => (
+            <div
+              key={item.key}
+              className={`flex items-center gap-1.5 rounded border px-2 py-1.5 ${
+                item.configured ? 'border-emerald-200 bg-emerald-50/60' : 'border-slate-200 bg-slate-50'
+              }`}
+              title={`${item.label}${item.configured ? ` · ${item.source === 'db' ? '数据库' : '.env'} ··${item.tail}` : ' · 未配置'}`}
+            >
+              {item.configured ? (
+                <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-600" />
+              ) : (
+                <XCircle className="h-3 w-3 shrink-0 text-slate-400" />
+              )}
+              <span className={`truncate ${item.configured ? 'text-emerald-800' : 'text-slate-500'}`}>
+                {item.label.replace(' API Key', '').replace(' Key', '').replace('Google OAuth ', 'OAuth ')}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {expanded && (
+      <div className="space-y-4">
+      <div className="flex justify-end">
         <button
           type="button"
           disabled={saving || Object.values(draft).every((v) => !v || !v.trim())}
@@ -226,6 +265,20 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, onRefresh }) 
       })}
 
       {msg ? (
+        <div
+          className={`rounded border px-3 py-2 text-[11px] font-medium ${
+            msg.ok
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-rose-200 bg-rose-50 text-rose-800'
+          }`}
+        >
+          {msg.text}
+        </div>
+      ) : null}
+      </div>
+      )}
+
+      {!expanded && msg ? (
         <div
           className={`rounded border px-3 py-2 text-[11px] font-medium ${
             msg.ok
