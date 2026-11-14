@@ -64,8 +64,18 @@ export default function App() {
     void fetchState(channelId);
   }, [channelId, fetchState]);
 
+  /** 深链接意图：切到某页时可直接落在指定子标签（如创意库的「导入」） */
+  const [navIntent, setNavIntent] = useState<string | null>(null);
+
   const handleNavigate = (tab: string) => {
     setActiveTab(tab as NavTab);
+    setNavIntent(null);
+    setMobileMenuOpen(false);
+  };
+
+  const handleNavigateWithIntent = (tab: NavTab, intent: string) => {
+    setActiveTab(tab);
+    setNavIntent(intent);
     setMobileMenuOpen(false);
   };
 
@@ -186,7 +196,8 @@ export default function App() {
             )}
             <button
               type="button"
-              onClick={() => handleNavigate('library')}
+              onClick={() => handleNavigateWithIntent('library', 'import')}
+              title="前往创意库的「导入 JSON 与模板」"
               className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-3 sm:px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
             >
               <Plus className="h-3.5 w-3.5" />
@@ -220,6 +231,8 @@ export default function App() {
               {activeTab === 'library' && (
                 <LibraryView
                   state={state}
+                  initialSubTab={navIntent ?? undefined}
+                  onIntentConsumed={() => setNavIntent(null)}
                   onRefresh={() => fetchState(state.channel.id)}
                   onNavigate={handleNavigate}
                 />

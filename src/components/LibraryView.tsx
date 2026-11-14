@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   BookOpen,
@@ -26,8 +26,13 @@ import {
 import type { MelodyEntry, ValidationIssue, VideoSpec } from '../domain/types';
 import type { StudioState } from '../types/ui';
 
+type LibrarySubTab = 'specs' | 'custom' | 'ideas' | 'import' | 'templates' | 'melodies';
+
 interface LibraryViewProps {
   state: StudioState;
+  /** 从外部（如右上角「导入或生成 Spec」）指定落地子标签 */
+  initialSubTab?: string;
+  onIntentConsumed?: () => void;
   onRefresh: () => Promise<void>;
   onNavigate: (tab: string) => void;
 }
@@ -145,8 +150,28 @@ function previewMelodyWebAudio(notes: Array<{ beat: number; pitch: number; dur: 
   }
 }
 
-export const LibraryView: React.FC<LibraryViewProps> = ({ state, onRefresh, onNavigate }) => {
-  const [subTab, setSubTab] = useState<'specs' | 'custom' | 'ideas' | 'import' | 'templates' | 'melodies'>('specs');
+export const LibraryView: React.FC<LibraryViewProps> = ({
+  state,
+  initialSubTab,
+  onIntentConsumed,
+  onRefresh,
+  onNavigate,
+}) => {
+  const VALID_SUBTABS: LibrarySubTab[] = ['specs', 'custom', 'ideas', 'import', 'templates', 'melodies'];
+  const [subTab, setSubTab] = useState<LibrarySubTab>(
+    initialSubTab && VALID_SUBTABS.includes(initialSubTab as LibrarySubTab)
+      ? (initialSubTab as LibrarySubTab)
+      : 'specs'
+  );
+
+  // 外部意图变化时切换子标签（如再次点右上角按钮）
+  useEffect(() => {
+    if (!initialSubTab) return;
+    if (VALID_SUBTABS.includes(initialSubTab as LibrarySubTab)) {
+      setSubTab(initialSubTab as LibrarySubTab);
+    }
+    onIntentConsumed?.();
+  }, [initialSubTab, onIntentConsumed]);
   const [jsonInput, setJsonInput] = useState(() =>
     JSON.stringify(
       {
