@@ -184,7 +184,7 @@ async function startServer() {
   app.get('/api/state', (req, res) => {
     const db = loadDb();
     const channelId = typeof req.query.channelId === 'string' ? req.query.channelId : db.channels[0]?.id;
-    res.json(getChannelScopedState(db, channelId));
+    res.json({ ...getChannelScopedState(db, channelId), _build: { rev: process.env.BUILD_REV || 'dev', deployed_at: process.env.BUILD_AT || null } });
   });
 
   app.get('/api/templates', (_req, res) => {
