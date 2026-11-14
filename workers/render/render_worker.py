@@ -9,12 +9,26 @@ pure Python stdlib + ffmpeg (no PIL/numpy/GPU/Chromium required).
 import json
 import math
 import os
-import random
 import struct
 import subprocess
 import sys
 import tempfile
 import wave
+
+# spec_params 与渲染器同目录；直接运行脚本时把目录加入 sys.path
+_WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
+if _WORKER_DIR not in sys.path:
+    sys.path.insert(0, _WORKER_DIR)
+
+import spec_params  # noqa: E402
+from spec_params import (  # noqa: E402
+    load_params,
+    resolve_pixels,
+    derive_rng,
+    TrailParams,
+    BackgroundParams,
+    CameraParams,
+)
 
 
 RENDER_W = 270
@@ -146,56 +160,150 @@ def draw_rect_outline(buf: bytearray, x: int, y: int, w: int, h: int, color: tup
     draw_line(buf, x, y + h, x, y, 2, color)
 
 
+# ---------------------------------------------------------------------------
+# 背景缓存 / 摄像机变换
+# ---------------------------------------------------------------------------
+
+def build_background(bg: BackgroundParams) -> bytearray:
+    """按 style.background 预生成一帧背景，整段渲染复用同一份 bytes。
+
+    - solid    : 纯 colors[0]
+    - gradient : colors[0] → colors[1] 垂直渐变
+    - grid     : colors[0] 打底 + colors[1] 垂直渐变，再叠加间距 6% 画面宽的网格，
+                 网格线亮度抬高 6%
+    """
+    canvas = bytearray(RENDER_W * RENDER_H * 3)
+    colors = bg.colors or ["#05060F"]
+
+    if bg.type == "solid" or len(colors) < 2:
+        c = hex_to_rgb(colors[0], (7, 11, 24))
+        base = bytes(c) * (RENDER_W * RENDER_H)
+        canvas[:] = base
+    else:
+        top = hex_to_rgb(colors[0], (7, 11, 24))
+        bottom = hex_to_rgb(colors[1], (7, 11, 24))
+        for y in range(RENDER_H):
+            k = y / max(1, RENDER_H - 1)
+            r = int(top[0] + (bottom[0] - top[0]) * k)
+            g = int(top[1] + (bottom[1] - top[1]) * k)
+            b = int(top[2] + (bottom[2] - top[2]) * k)
+            row = bytes((r, g, b)) * RENDER_W
+            canvas[y * RENDER_W * 3:(y + 1) * RENDER_W * 3] = row
+
+    if bg.type == "grid":
+        # 网格线：间距 6% 画面宽，亮度 +6%
+        spacing = max(4, int(round(RENDER_W * 0.06)))
+        for x in range(0, RENDER_W, spacing):
+            for y in range(RENDER_H):
+                idx = (y * RENDER_W + x) * 3
+                for ch in range(3):
+                    canvas[idx + ch] = min(255, int(canvas[idx + ch] * 1.06))
+        for y in range(0, RENDER_H, spacing):
+            row_off = y * RENDER_W * 3
+            for x in range(RENDER_W):
+                idx = row_off + x * 3
+                for ch in range(3):
+                    canvas[idx + ch] = min(255, int(canvas[idx + ch] * 1.06))
+
+    return canvas
+
+
+def zoom_at(scale: float, x: float, y: float, cx: float = None, cy: float = None):
+    """以画面中心为原点做缩放，返回缩放后的坐标。"""
+    if cx is None:
+        cx = RENDER_W * 0.5
+    if cy is None:
+        cy = RENDER_H * 0.5
+    return (cx + (x - cx) * scale, cy + (y - cy) * scale)
+
+
+def frame_zoom(cam: CameraParams, t: float, duration: float) -> float:
+    """zoom_from → zoom_to 在整段时长内线性插值。"""
+    if duration <= 0 or not cam.animates:
+        return cam.zoom_from
+    k = min(1.0, max(0.0, t / duration))
+    return cam.zoom_from + (cam.zoom_to - cam.zoom_from) * k
+
+
+def draw_trail(buf: bytearray, points: list, radius: float, color: tuple, trail: TrailParams):
+    """按 trail.length_frames / fade 绘制拖尾。enabled=false 或 length=0 时跳过。"""
+    if not trail.active or not points:
+        return
+    n = len(points)
+    for i, (tx, ty) in enumerate(points):
+        # 越靠尾端越暗；fade 控制整体衰减强度
+        k = (i + 1) / n
+        brightness = (1.0 - trail.fade) + trail.fade * k
+        tr_col = (
+            int(color[0] * brightness),
+            int(color[1] * brightness),
+            int(color[2] * brightness),
+        )
+        draw_circle(buf, tx, ty, max(1.0, radius * 0.55), tr_col)
+
+
 def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess.Popen):
-    scene = spec.get("scene", {})
-    seed = int(scene.get("seed", 1))
-    rng = random.Random(seed)
-    fps = int(spec["format"]["fps"])
-    duration = float(spec["format"]["duration_sec"])
+    """渲染所有帧并把 RGB24 数据写进 ffmpeg 的 stdin，返回音频事件列表。
+
+    所有可调参数一律经 spec_params.load_params() 获取，不再直接读 params 字典。
+    """
+    P = resolve_pixels(load_params(spec), RENDER_W, RENDER_H)
+    for w in P.warnings:
+        print(f"[render] warning: {w}", file=sys.stderr)
+
+    fps = P.fps
+    duration = P.duration_sec
     total_frames = max(1, int(fps * duration))
     dt = 1.0 / fps
 
-    template_key = scene.get("template") or spec.get("template", {}).get("key", "melody-bounce")
-    params = scene.get("params") or spec.get("template", {}).get("params", {})
-    style = scene.get("style", {})
-    bg_list = style.get("background", {}).get("colors") or []
-    pal_list = style.get("palette", {}).get("colors") or ["#38BDF8", "#F472B6", "#FBBF24", "#34D399"]
+    accent_rgbs = [hex_to_rgb(c, (56, 189, 248)) for c in P.style.palette]
+    if not accent_rgbs:
+        accent_rgbs = [(56, 189, 248), (244, 114, 182), (251, 191, 36)]
 
-    bg_rgb = hex_to_rgb(bg_list[0] if bg_list else "#070B18", (7, 11, 24))
-    accent_rgbs = [hex_to_rgb(c, (56, 189, 248)) for c in pal_list] or [(56, 189, 248), (244, 114, 182), (251, 191, 36)]
+    # 背景只生成一次，整段复用
+    bg_template = bytes(build_background(P.style.background))
 
-    bg_template = bytes(bg_rgb) * (RENDER_W * RENDER_H)
-
+    # 旋律音高 + transpose（半音）
     notes = []
     if melody and melody.get("tracks"):
-        notes = [n["pitch"] for n in melody["tracks"][0]["notes"]]
+        notes = [int(n["pitch"]) + P.audio.transpose for n in melody["tracks"][0]["notes"]]
     if not notes:
         notes = [60, 62, 64, 67, 69, 72]
+        notes = [n + P.audio.transpose for n in notes]
 
+    trail = P.style.trail
+    cam = P.style.camera
     events = []
     note_idx = 0
 
-    if template_key == "pendulum-wave":
-        pend_cfg = params.get("pendulum", {})
-        rule_cfg = params.get("rule", {})
-        count = max(6, min(24, int(pend_cfg.get("count", 15))))
-        len_min = float(pend_cfg.get("length_min", 0.24))
-        len_step = float(pend_cfg.get("length_step", 0.022))
-        max_angle = math.radians(float(pend_cfg.get("max_angle_deg", 52)))
-        damping = float(pend_cfg.get("damping", 0.0))
-        cycle_sec = max(8.0, float(rule_cfg.get("cycle_sec", 24.0)))
-        rule_type = rule_cfg.get("type", "harmonic_sweep")
+    # =====================================================================
+    # pendulum-wave
+    # =====================================================================
+    if P.template == "pendulum-wave":
+        pd = P.pendulum
+        count = pd.count
+        max_angle = math.radians(pd.max_angle_deg)
+        damping = pd.damping
+        cycle_sec = pd.cycle_sec
+        rule_type = pd.rule_type
 
         pivot_x = RENDER_W * 0.5
         pivot_y = RENDER_H * 0.20
         prev_thetas = [0.0] * count
+        bob_trails = [[] for _ in range(count)]
 
         for f_idx in range(total_frames):
             t = f_idx * dt
+            z = frame_zoom(cam, t, duration)
             frame = bytearray(bg_template)
-            # Center resonance trigger line & top pivot bar
-            draw_line(frame, pivot_x, pivot_y, pivot_x, RENDER_H * 0.84, 1, (51, 65, 85))
-            draw_line(frame, RENDER_W * 0.2, pivot_y, RENDER_W * 0.8, pivot_y, 2, (148, 163, 184))
+
+            # 中枢参考线与顶部枢轴横杆
+            px0, py0 = zoom_at(z, pivot_x, pivot_y)
+            px1, py1 = zoom_at(z, pivot_x, RENDER_H * 0.84)
+            draw_line(frame, px0, py0, px1, py1, 1, (51, 65, 85))
+            bx0, by0 = zoom_at(z, RENDER_W * 0.2, pivot_y)
+            bx1, by1 = zoom_at(z, RENDER_W * 0.8, pivot_y)
+            draw_line(frame, bx0, by0, bx1, by1, 2, (148, 163, 184))
 
             damp_factor = math.exp(-damping * t)
             for i in range(count):
@@ -203,57 +311,78 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 omega = (2.0 * math.pi * osc_count) / cycle_sec
                 pulse_mod = (1.0 + 0.08 * math.sin(t * 2.1)) if rule_type == "gravity_pulse" else 1.0
                 theta = max_angle * damp_factor * math.cos(omega * t * pulse_mod - 1.15)
-                pend_len = min(0.62, len_min + i * len_step) * RENDER_H
-                bx = pivot_x + math.sin(theta) * pend_len * 0.48
-                by = pivot_y + math.cos(theta) * pend_len
+                pend_len = min(0.62, pd.length_min + i * pd.length_step) * RENDER_H
+                raw_x = pivot_x + math.sin(theta) * pend_len * 0.48
+                raw_y = pivot_y + math.cos(theta) * pend_len
                 col = accent_rgbs[i % len(accent_rgbs)]
 
-                if f_idx > 0 and ((prev_thetas[i] < 0 <= theta) or (prev_thetas[i] > 0 >= theta)):
-                    events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.78})
-                    note_idx += 1
+                # note_trigger.on: center_crossing | peak_reversal
+                if f_idx > 0:
+                    crossed = (prev_thetas[i] < 0 <= theta) or (prev_thetas[i] > 0 >= theta)
+                    if P.note_trigger.on == "peak_reversal":
+                        prev_abs = abs(prev_thetas[i])
+                        trigger = abs(theta) > prev_abs and f_idx > 1 and abs(theta) > max_angle * 0.55 * damp_factor
+                    else:
+                        trigger = crossed
+                    if trigger:
+                        events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.78})
+                        note_idx += 1
                 prev_thetas[i] = theta
 
-                draw_line(frame, pivot_x, pivot_y, bx, by, 1, (100, 116, 139))
-                draw_circle(frame, bx, by, 5.0, col)
+                lx0, ly0 = zoom_at(z, pivot_x, pivot_y)
+                lx1, ly1 = zoom_at(z, raw_x, raw_y)
+                draw_line(frame, lx0, ly0, lx1, ly1, 1, (100, 116, 139))
+
+                if trail.active:
+                    bob_trails[i].append((raw_x, raw_y))
+                    while len(bob_trails[i]) > trail.length_frames:
+                        bob_trails[i].pop(0)
+                    draw_trail(frame, [zoom_at(z, tx, ty) for tx, ty in bob_trails[i]],
+                               5.0 * z, col, trail)
+
+                sx, sy = zoom_at(z, raw_x, raw_y)
+                draw_circle(frame, sx, sy, 5.0 * z, col)
 
             proc.stdin.write(frame)
 
-    elif template_key == "orbit-sync":
-        orb_cfg = params.get("orbits", {})
-        rule_cfg = params.get("rule", {})
-        count = max(4, min(18, int(orb_cfg.get("count", 10))))
-        base_r = float(orb_cfg.get("base_radius", 0.11))
-        step_r = float(orb_cfg.get("radius_step", 0.032))
-        base_omega = float(orb_cfg.get("base_omega", 1.05))
-        res_ratio = float(orb_cfg.get("resonance_ratio", 0.14))
-        rule_type = rule_cfg.get("type", "harmonic_align")
-        trig_rad = math.radians(float(rule_cfg.get("trigger_angle_deg", -90.0)))
+    # =====================================================================
+    # orbit-sync
+    # =====================================================================
+    elif P.template == "orbit-sync":
+        ob = P.orbits
+        count = ob.count
+        base_r = ob.base_radius
+        step_r = ob.radius_step
+        base_omega = ob.base_omega
+        res_ratio = ob.resonance_ratio
+        rule_type = ob.rule_type
+        trig_rad = math.radians(ob.trigger_angle_deg)
 
         cx, cy = RENDER_W * 0.5, RENDER_H * 0.50
         prev_angles = [trig_rad - 0.16 - i * 0.07 for i in range(count)]
+        planet_trails = [[] for _ in range(count)]
 
         for f_idx in range(total_frames):
             t = f_idx * dt
+            z = frame_zoom(cam, t, duration)
             frame = bytearray(bg_template)
             beam_r = RENDER_W * 0.46
-            draw_line(
-                frame,
-                cx,
-                cy,
-                cx + math.cos(trig_rad) * beam_r,
-                cy + math.sin(trig_rad) * beam_r,
-                2,
-                (226, 232, 240),
-            )
-            draw_circle(frame, cx, cy, 4.5, (248, 250, 252))
+
+            scx, scy = zoom_at(z, cx, cy)
+            bex, bey = zoom_at(z, cx + math.cos(trig_rad) * beam_r, cy + math.sin(trig_rad) * beam_r)
+            draw_line(frame, scx, scy, bex, bey, 2, (226, 232, 240))
+            draw_circle(frame, scx, scy, 4.5 * z, (248, 250, 252))
+
+            # pulse_rings: 圆环半径按 1+0.06*sin(t*3) 脉动
+            pulse = (1.0 + 0.06 * math.sin(t * 3.0)) if rule_type == "pulse_rings" else 1.0
 
             for i in range(count):
                 direction = -1.0 if (rule_type == "reverse_outer" and i >= count // 2) else 1.0
                 omega = direction * base_omega * (1.0 + i * res_ratio)
                 angle = trig_rad - 0.16 - i * 0.07 + omega * t
-                ring_r = min(0.44, base_r + i * step_r) * RENDER_W
+                ring_r = min(0.44, base_r + i * step_r) * RENDER_W * pulse
                 col = accent_rgbs[i % len(accent_rgbs)]
-                draw_ring(frame, cx, cy, ring_r, 1.2, (51, 65, 85))
+                draw_ring(frame, scx, scy, ring_r * z, 1.2 * z, (51, 65, 85))
 
                 if f_idx > 0:
                     prev_k = math.floor((prev_angles[i] - trig_rad) / (2.0 * math.pi))
@@ -263,25 +392,58 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         note_idx += 1
                 prev_angles[i] = angle
 
-                bx = cx + math.cos(angle) * ring_r
-                by = cy + math.sin(angle) * ring_r
-                draw_circle(frame, bx, by, 4.8, col)
+                raw_x = cx + math.cos(angle) * ring_r
+                raw_y = cy + math.sin(angle) * ring_r
+
+                if trail.active:
+                    planet_trails[i].append((raw_x, raw_y))
+                    while len(planet_trails[i]) > trail.length_frames:
+                        planet_trails[i].pop(0)
+                    draw_trail(frame, [zoom_at(z, tx, ty) for tx, ty in planet_trails[i]],
+                               4.8 * z, col, trail)
+
+                sx, sy = zoom_at(z, raw_x, raw_y)
+                draw_circle(frame, sx, sy, 4.8 * z, col)
 
             proc.stdin.write(frame)
 
-    elif template_key == "ball-sort":
-        colors_hex = params.get("balls", {}).get("colors", ["#FF595E", "#FFCA3A", "#8AC926", "#1982C4"])
-        bin_rgbs = [hex_to_rgb(c) for c in colors_hex]
-        num_bins = max(2, min(6, int(params.get("bins", {}).get("count", 4))))
-        ball_count = max(8, min(32, int(params.get("balls", {}).get("count", 20))))
+    # =====================================================================
+    # ball-sort
+    # =====================================================================
+    elif P.template == "ball-sort":
+        bs = P.bin_sort
+        bin_rgbs = [hex_to_rgb(c) for c in bs.colors]
+        num_bins = bs.bin_count
+        ball_count = bs.ball_count
 
+        # 钉子：rows 行，jitter 由 seed 派生
+        peg_rng = derive_rng(P.seed, "pegs")
         pegs = []
-        for row in range(6):
+        for row in range(bs.peg_rows):
             cols = 5 if row % 2 == 0 else 4
-            py = 0.34 + row * 0.068
+            py = 0.34 + row * (0.40 / max(1, bs.peg_rows))
             for col in range(cols):
                 px = 0.22 + (col + (0.5 if row % 2 == 1 else 0.0)) * 0.14
+                if bs.peg_jitter > 0:
+                    px += peg_rng.uniform(-bs.peg_jitter, bs.peg_jitter) * 0.02
+                    py += peg_rng.uniform(-bs.peg_jitter, bs.peg_jitter) * 0.02
                 pegs.append((px, py))
+
+        # 桶布局
+        bin_w = (RENDER_W - 32) / num_bins
+        bin_positions = []
+        for b in range(num_bins):
+            if bs.layout == "stepped":
+                bx = 16 + b * bin_w
+                by = 0.755 * RENDER_H + b * (0.055 * RENDER_H / max(1, num_bins - 1))
+            else:
+                # under-funnel / split-chute（暂用 under-funnel）
+                bx = 16 + b * bin_w
+                by = 0.79 * RENDER_H
+            bin_positions.append((bx, by))
+
+        moving_gate = bs.gate_moving
+        gate_period = bs.gate_period_s
 
         active_balls = []
         spawn_interval = max(4, total_frames // (ball_count + 4))
@@ -289,35 +451,64 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         for f_idx in range(total_frames):
             t = f_idx * dt
+            z = frame_zoom(cam, t, duration)
+
             if f_idx % spawn_interval == 0 and len(active_balls) < ball_count:
                 color_idx = len(active_balls) % num_bins
                 active_balls.append({
-                    "x": 0.5 + rng.uniform(-0.04, 0.04),
+                    "x": 0.5 + peg_rng.uniform(-0.04, 0.04),
                     "y": 0.18,
-                    "vx": rng.uniform(-0.08, 0.08),
+                    "vx": peg_rng.uniform(-0.08, 0.08),
                     "vy": 0.12,
                     "cidx": color_idx,
                     "settled": False,
                 })
 
             frame = bytearray(bg_template)
-            # Draw funnel & pegs
-            draw_line(frame, 0.36 * RENDER_W, 0.16 * RENDER_H, 0.45 * RENDER_W, 0.26 * RENDER_H, 2, (148, 163, 184))
-            draw_line(frame, 0.64 * RENDER_W, 0.16 * RENDER_H, 0.55 * RENDER_W, 0.26 * RENDER_H, 2, (148, 163, 184))
-            for px, py in pegs:
-                draw_circle(frame, px * RENDER_W, py * RENDER_H, 3.0, (148, 163, 184))
 
-            # Draw bins
-            bin_w = (RENDER_W - 32) / num_bins
+            # 漏斗
+            fl0 = zoom_at(z, 0.36 * RENDER_W, 0.16 * RENDER_H)
+            fl1 = zoom_at(z, 0.45 * RENDER_W, 0.26 * RENDER_H)
+            fr0 = zoom_at(z, 0.64 * RENDER_W, 0.16 * RENDER_H)
+            fr1 = zoom_at(z, 0.55 * RENDER_W, 0.26 * RENDER_H)
+            draw_line(frame, fl0[0], fl0[1], fl1[0], fl1[1], 2, (148, 163, 184))
+            draw_line(frame, fr0[0], fr0[1], fr1[0], fr1[1], 2, (148, 163, 184))
+
+            for px, py in pegs:
+                sx, sy = zoom_at(z, px * RENDER_W, py * RENDER_H)
+                draw_circle(frame, sx, sy, 3.0 * z, (148, 163, 184))
+
+            # 桶
             for b in range(num_bins):
-                bx = int(16 + b * bin_w)
-                draw_rect_outline(frame, bx + 2, int(0.79 * RENDER_H), int(bin_w - 4), int(0.13 * RENDER_H), bin_rgbs[b % len(bin_rgbs)])
+                bx, by = bin_positions[b]
+                ox, oy = zoom_at(z, bx + 2, by)
+                draw_rect_outline(
+                    frame, int(ox), int(oy),
+                    int((bin_w - 4) * z), int(0.13 * RENDER_H * z),
+                    bin_rgbs[b % len(bin_rgbs)],
+                )
+
+            # 移动挡板：在画面中段左右往复，周期 period_s
+            gate_x_norm = None
+            if moving_gate:
+                phase = (t % gate_period) / gate_period
+                gate_x_norm = 0.30 + 0.40 * (0.5 - 0.5 * math.cos(phase * 2.0 * math.pi))
+                gx0 = zoom_at(z, gate_x_norm * RENDER_W, 0.60 * RENDER_H)
+                gx1 = zoom_at(z, gate_x_norm * RENDER_W, 0.66 * RENDER_H)
+                draw_line(frame, gx0[0], gx0[1], gx1[0], gx1[1], 3, (226, 232, 240))
 
             for b_obj in active_balls:
                 if not b_obj["settled"]:
                     b_obj["vy"] += 0.65 * dt
                     b_obj["x"] += b_obj["vx"] * dt
                     b_obj["y"] += b_obj["vy"] * dt
+
+                    # 挡板碰撞：撞上时横向弹开
+                    if moving_gate and b_obj["y"] > 0.595 and b_obj["y"] < 0.665:
+                        if abs(b_obj["x"] - gate_x_norm) < 0.035:
+                            b_obj["vx"] += (0.6 if b_obj["x"] > gate_x_norm else -0.6) * 0.12
+                            b_obj["vy"] = max(b_obj["vy"], 0.02)
+
                     if b_obj["x"] < 0.12:
                         b_obj["x"] = 0.12
                         b_obj["vx"] = abs(b_obj["vx"]) * 0.85
@@ -339,82 +530,98 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                                 events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.65})
                                 note_idx += 1
 
-                    # Guide subtly into target bin in lower gate
+                    # 下层引导入目标桶
                     if b_obj["y"] > 0.72:
                         target_x = (16 + (b_obj["cidx"] + 0.5) * bin_w) / RENDER_W
                         b_obj["vx"] += (target_x - b_obj["x"]) * 6.0 * dt
 
-                    if b_obj["y"] >= 0.88:
+                    settle_y = bin_positions[b_obj["cidx"]][1] / RENDER_H + 0.09
+                    if b_obj["y"] >= settle_y:
                         b_obj["settled"] = True
                         slot = b_obj["cidx"]
                         stack_idx = bin_counts[slot]
                         bin_counts[slot] += 1
                         b_obj["x"] = (16 + (slot + 0.5) * bin_w + ((stack_idx % 3) - 1) * 7) / RENDER_W
-                        b_obj["y"] = 0.90 - (stack_idx // 3) * 0.024
+                        b_obj["y"] = settle_y + 0.01 - (stack_idx // 3) * 0.024
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.95})
                         note_idx += 1
 
-                draw_circle(frame, b_obj["x"] * RENDER_W, b_obj["y"] * RENDER_H, 5.5, bin_rgbs[b_obj["cidx"] % len(bin_rgbs)])
+                sx, sy = zoom_at(z, b_obj["x"] * RENDER_W, b_obj["y"] * RENDER_H)
+                draw_circle(frame, sx, sy, 5.5 * z, bin_rgbs[b_obj["cidx"] % len(bin_rgbs)])
 
             proc.stdin.write(frame)
-    else:
-        # melody-bounce deterministic arena simulation
-        arena_cfg = params.get("arena", {})
-        shape = arena_cfg.get("shape", "circle")
-        rot_deg_s = float(arena_cfg.get("rotation_deg_per_s", 10.0))
-        rule_cfg = params.get("rule", {})
-        rule_type = rule_cfg.get("type", "speed_up")
 
+    # =====================================================================
+    # melody-bounce（默认分支）
+    # =====================================================================
+    else:
+        ar = P.arena
+        bl = P.balls
+        rl = P.rule
+
+        shape = ar.shape
         sides = 6 if shape == "hexagon" else 3 if shape == "triangle" else 5 if shape == "polygon" else 0
         cx, cy = RENDER_W * 0.5, RENDER_H * 0.52
-        arena_r = RENDER_W * 0.39
+        arena_r = ar.radius_px
+        wall_px = max(1.0, ar.wall_px)
 
-        balls = [{
-            "x": cx + rng.uniform(-12, 12),
-            "y": cy - 35,
-            "vx": 128.0 * (1 if rng.random() > 0.5 else -1),
-            "vy": 96.0,
-            "r": 7.5,
-            "color": accent_rgbs[0],
-            "trail": [],
-        }]
+        gravity_y = bl.gravity_px
+        restitution = bl.restitution
+        speed_px = bl.speed_px
+        max_count = bl.max_count
+
+        init_rng = derive_rng(P.seed, "balls")
+
+        balls = []
+        for _ in range(bl.count_start):
+            balls.append({
+                "x": cx + init_rng.uniform(-12, 12),
+                "y": cy - 35,
+                "vx": speed_px * (1 if init_rng.random() > 0.5 else -1),
+                "vy": speed_px * 0.75,
+                "r": bl.radius_px,
+                "color": accent_rgbs[len(balls) % len(accent_rgbs)],
+                "trail": [],
+            })
 
         bounce_count = 0
         flash_timer = 0.0
+        gravity_sign = 1.0
 
         for f_idx in range(total_frames):
             t = f_idx * dt
-            angle_rad = math.radians(rot_deg_s * t)
+            z = frame_zoom(cam, t, duration)
+            angle_rad = math.radians(ar.rotation_deg_per_s * t)
             flash_timer = max(0.0, flash_timer - dt)
 
             frame = bytearray(bg_template)
 
-            # Arena outline (circle or rotating N-gon)
+            # 场地轮廓
             wall_color = accent_rgbs[bounce_count % len(accent_rgbs)] if flash_timer > 0 else (203, 213, 225)
-            cur_r = arena_r * (max(0.62, 1.0 - bounce_count * 0.008) if rule_type == "shrink_wall" else 1.0)
+            cur_r = arena_r * (max(0.62, 1.0 - bounce_count * 0.008) if rl.type == "shrink_wall" else 1.0)
+            scx, scy = zoom_at(z, cx, cy)
             if sides == 0:
-                draw_ring(frame, cx, cy, cur_r, 3.0, wall_color)
+                draw_ring(frame, scx, scy, cur_r * z, wall_px * z, wall_color)
             else:
                 pts = [
-                    (
-                        cx + cur_r * math.cos(angle_rad + 2 * math.pi * i / sides),
-                        cy + cur_r * math.sin(angle_rad + 2 * math.pi * i / sides),
-                    )
+                    zoom_at(z,
+                            cx + cur_r * math.cos(angle_rad + 2 * math.pi * i / sides),
+                            cy + cur_r * math.sin(angle_rad + 2 * math.pi * i / sides))
                     for i in range(sides)
                 ]
                 for i in range(sides):
                     p0 = pts[i]
                     p1 = pts[(i + 1) % sides]
-                    draw_line(frame, p0[0], p0[1], p1[0], p1[1], 3, wall_color)
+                    draw_line(frame, p0[0], p0[1], p1[0], p1[1], max(1, int(wall_px)), wall_color)
 
-            # Update & draw balls
             new_balls = []
             for b in balls:
-                b["vy"] += 155.0 * dt
+                b["vy"] += gravity_y * gravity_sign * dt
                 b["x"] += b["vx"] * dt
                 b["y"] += b["vy"] * dt
+
                 b["trail"].append((b["x"], b["y"]))
-                if len(b["trail"]) > 8:
+                while len(b["trail"]) > max(1, trail.length_frames):
                     b["trail"].pop(0)
 
                 dx, dy = b["x"] - cx, b["y"] - cy
@@ -426,34 +633,42 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     b["y"] = cy + ny * limit
                     dot = b["vx"] * nx + b["vy"] * ny
                     if dot > 0:
-                        b["vx"] -= 2.0 * dot * nx
-                        b["vy"] -= 2.0 * dot * ny
-                        if rule_type == "speed_up":
+                        # 反弹：法向分量按 restitution 反射
+                        b["vx"] -= (1.0 + restitution) * dot * nx
+                        b["vy"] -= (1.0 + restitution) * dot * ny
+
+                        if rl.type == "speed_up":
                             b["vx"] *= 1.025
                             b["vy"] *= 1.025
-                        elif rule_type == "grow_on_bounce":
-                            b["r"] = min(26.0, b["r"] * 1.035)
-                        elif rule_type == "split_on_bounce" and len(balls) + len(new_balls) < 12 and bounce_count % 3 == 2:
-                            new_balls.append({
-                                "x": b["x"],
-                                "y": b["y"],
-                                "vx": -b["vx"] * 0.92 + rng.uniform(-18, 18),
-                                "vy": b["vy"] * 0.95,
-                                "r": max(5.0, b["r"] * 0.92),
-                                "color": accent_rgbs[(len(balls) + len(new_balls)) % len(accent_rgbs)],
-                                "trail": [],
-                            })
+                        elif rl.type == "grow_on_bounce":
+                            b["r"] = min(cur_r * 0.45, b["r"] * rl.scale_factor)
+                        elif rl.type == "split_on_bounce":
+                            if (bounce_count % rl.every_n_bounces == 0
+                                    and len(balls) + len(new_balls) < max_count):
+                                new_balls.append({
+                                    "x": b["x"],
+                                    "y": b["y"],
+                                    "vx": -b["vx"] * 0.92 + init_rng.uniform(-18, 18),
+                                    "vy": b["vy"] * 0.95,
+                                    "r": max(3.0, b["r"] * 0.92),
+                                    "color": accent_rgbs[(len(balls) + len(new_balls)) % len(accent_rgbs)],
+                                    "trail": [],
+                                })
+                        elif rl.type == "gravity_flip":
+                            if bounce_count % rl.every_n_bounces == 0:
+                                gravity_sign *= -1.0
+
                         bounce_count += 1
                         flash_timer = 0.12
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.9})
                         note_idx += 1
 
-                for tidx, (tx, ty) in enumerate(b["trail"]):
-                    fade = 0.25 + 0.55 * (tidx / max(1, len(b["trail"])))
-                    tr_col = (int(b["color"][0] * fade), int(b["color"][1] * fade), int(b["color"][2] * fade))
-                    draw_circle(frame, tx, ty, max(2.0, b["r"] * 0.55), tr_col)
+                if trail.active:
+                    scaled = [zoom_at(z, tx, ty) for tx, ty in b["trail"]]
+                    draw_trail(frame, scaled, b["r"] * z, b["color"], trail)
 
-                draw_circle(frame, b["x"], b["y"], b["r"], b["color"])
+                sbx, sby = zoom_at(z, b["x"], b["y"])
+                draw_circle(frame, sbx, sby, b["r"] * z, b["color"])
 
             balls.extend(new_balls)
             proc.stdin.write(frame)
