@@ -169,6 +169,10 @@ class FxSystem:
 
         # 统计用（断言上限）
         self.peak_particles = 0
+        # T5：粒子数量倍率（0.6 + 0.8*I），由渲染器每帧设置
+        self.particle_scale = 1.0
+        # T5：drop 蓄力静默窗内抑制新粒子与涟漪（画面也安静下来）
+        self.silenced = False
 
     # -- 事件入口 ----------------------------------------------------------
 
@@ -197,13 +201,15 @@ class FxSystem:
             self.flash_val = min(0.35, self.flash_val + (0.06 + 0.10 * i) * cfg.flash)
             self.flash_color = color
 
+        silenced = getattr(self, "silenced", False)
+
         # 2) 涟漪
-        if cfg.ripple > 0:
+        if cfg.ripple > 0 and not silenced:
             self.ripples.append(Ripple(x, y, t, color, cfg.ripple))
 
         # 3) 粒子
-        if cfg.particles > 0:
-            n = int(round((6 + 10 * i) * cfg.particles))
+        if cfg.particles > 0 and not silenced:
+            n = int(round((6 + 10 * i) * cfg.particles * self.particle_scale))
             for _ in range(n):
                 ang = self.rng.uniform(0.0, 2.0 * math.pi)
                 spd = self.rng.uniform(0.12, 0.36) * self.w

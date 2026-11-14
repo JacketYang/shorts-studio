@@ -144,6 +144,7 @@ export const FIXTURE_MELODY_BOUNCE: VideoSpec = {
       trail: { enabled: true, length_frames: 18, fade: 0.85 },
       camera: { zoom_from: 1.0, zoom_to: 1.15, shake: 0.0 },
     },
+    arc: { preset: 'ramp', climax_at: 0.86, hook_peek: true },
     params: {
       arena: { shape: 'hexagon', size: 0.78, wall_thickness: 0.012, rotation_deg_per_s: 6 },
       balls: { count_start: 1, radius: 0.028, speed: 0.55, restitution: 1.0, gravity: 0.0, max_count: 64 },
@@ -247,6 +248,7 @@ export const FIXTURE_BALL_SORT: VideoSpec = {
       trail: { enabled: true, length_frames: 10, fade: 0.78 },
       camera: { zoom_from: 1.0, zoom_to: 1.04, shake: 0.0 },
     },
+    arc: { preset: 'tease-then-build', climax_at: 0.88, hook_peek: true },
     params: {
       balls: { count: 24, colors: ['#FF595E', '#FFCA3A', '#8AC926', '#1982C4'] },
       bins: { count: 4, layout: 'under-funnel' },
@@ -356,6 +358,7 @@ export const FIXTURE_PENDULUM_WAVE: VideoSpec = {
       background: { type: 'gradient', colors: ['#040814', '#0F172A'] },
       trail: { enabled: true, length_frames: 14, fade: 0.8 },
     },
+    arc: { preset: 'wave', climax_at: 0.82, hook_peek: true },
     params: {
       pendulum: { count: 15, length_min: 0.24, length_step: 0.022, max_angle_deg: 52, damping: 0.0 },
       rule: { type: 'harmonic_sweep', cycle_sec: 24 },
@@ -455,6 +458,7 @@ export const FIXTURE_ORBIT_SYNC: VideoSpec = {
       background: { type: 'solid', colors: ['#060714'] },
       trail: { enabled: true, length_frames: 20, fade: 0.85 },
     },
+    arc: { preset: 'drop', climax_at: 0.85, hook_peek: true },
     params: {
       orbits: { count: 10, base_radius: 0.11, radius_step: 0.032, base_omega: 1.05, resonance_ratio: 0.14 },
       rule: { type: 'harmonic_align', trigger_angle_deg: -90 },

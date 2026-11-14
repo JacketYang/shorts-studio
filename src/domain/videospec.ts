@@ -136,6 +136,14 @@ export const VideoSpecSchema = z.object({
         })
         .optional(),
     }),
+    // T5 强度曲线：让成片有铺垫、升级、高潮、收尾。可选，缺省按 ramp 处理。
+    arc: z
+      .object({
+        preset: z.enum(['ramp', 'tease-then-build', 'wave', 'countdown', 'drop']).optional(),
+        climax_at: z.number().min(0.5).max(0.95).optional(),
+        hook_peek: z.boolean().optional(),
+      })
+      .optional(),
     params: z.record(z.string(), z.unknown()),
   }),
   timeline: z.array(
@@ -645,6 +653,21 @@ export const VIDEO_SPEC_JSON_SCHEMA = {
     scene: {
       type: 'object',
       required: ['template', 'template_version', 'seed', 'style', 'params'],
+      properties: {
+        arc: {
+          type: 'object',
+          description: '强度曲线：给成片提供铺垫/升级/高潮/收尾',
+          properties: {
+            preset: {
+              type: 'string',
+              enum: ['ramp', 'tease-then-build', 'wave', 'countdown', 'drop'],
+              default: 'ramp',
+            },
+            climax_at: { type: 'number', minimum: 0.5, maximum: 0.95, default: 0.85 },
+            hook_peek: { type: 'boolean', default: true },
+          },
+        },
+      },
     },
     axes: {
       type: 'object',

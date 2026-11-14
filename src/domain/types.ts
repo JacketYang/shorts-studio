@@ -91,6 +91,12 @@ export interface VideoSpec {
         vignette?: number;
       };
     };
+    /** T5 强度曲线；缺省按 ramp 处理 */
+    arc?: {
+      preset?: 'ramp' | 'tease-then-build' | 'wave' | 'countdown' | 'drop';
+      climax_at?: number;
+      hook_peek?: boolean;
+    };
     params: Record<string, unknown>;
   };
   timeline: Array<

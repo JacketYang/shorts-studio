@@ -191,6 +191,8 @@ class SpecParams:
     bin_sort: BinSortParams = field(default_factory=BinSortParams)
     style: StyleParams = field(default_factory=StyleParams)
     audio: AudioParams = field(default_factory=AudioParams)
+    # T5：原样保留 scene.arc，解析交给 arc.parse_arc
+    arc: dict = field(default_factory=dict)
 
     warnings: list = field(default_factory=list)
 
@@ -295,6 +297,8 @@ def load_params(spec: dict) -> SpecParams:
     style_raw = _as_dict(scene.get("style"))
     audio_raw = _as_dict(spec.get("audio"))
 
+    arc_raw = scene.get("arc")
+
     p = SpecParams(
         template=template_key,
         seed=clamp_int(scene.get("seed", 1), 0, 2 ** 31 - 1),
@@ -302,6 +306,7 @@ def load_params(spec: dict) -> SpecParams:
         duration_sec=max(0.1, float(fmt.get("duration_sec", 28) or 28)),
         width=clamp_int(fmt.get("width", 1080), 16, 4096),
         height=clamp_int(fmt.get("height", 1920), 16, 4096),
+        arc=arc_raw if isinstance(arc_raw, dict) else {},
     )
 
     # ---------------- style ----------------

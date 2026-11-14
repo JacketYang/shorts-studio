@@ -22,6 +22,7 @@ if _WORKER_DIR not in sys.path:
 
 import numpy as np  # noqa: E402
 
+import arc as arcmod  # noqa: E402
 import fx as fxmod  # noqa: E402
 import gfx  # noqa: E402
 import theme as thememod  # noqa: E402
@@ -270,6 +271,17 @@ class FrameComposer:
             buf[sy:h, sx:w] = tmp[0:h - sy, 0:w - sx]
 
 
+def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float) -> bool:
+    """T5：drop preset 的蓄力静默窗内抑制所有音频事件。
+
+    返回 True 表示已写入。物理与事件时刻不受影响，只是"不发声"。
+    """
+    if arcmod.is_drop_silence(spec, t):
+        return False
+    events.append({"t": t, "midi": midi, "intensity": intensity})
+    return True
+
+
 def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess.Popen):
     """渲染所有帧并把 RGB24 数据写进 ffmpeg 的 stdin，返回音频事件列表。
 
@@ -314,8 +326,15 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
     # T3：视觉反馈系统（粒子/涟漪/闪光/震屏）。level=0 时全为空操作。
     fx_cfg = fxmod.parse_fx(P.style.fx)
+    # T5：粒子数量倍率 0.6 + 0.8*I 在 spawn 时通过 fx_sys.particle_scale 生效
+    fx_sys_particle_scale = 1.0
     fx_rng = derive_rng(P.seed, "fx")
     fx_sys = fxmod.FxSystem(fx_cfg, fx_rng, W, H)
+
+    # T5：强度曲线。I(t) 只影响强度类参数，不改物理/随机序列。
+    arc_cfg = arcmod.parse_arc(spec)
+    _fired_beats: dict = {}
+    _fired_burst = False
 
     composer = FrameComposer(H, W)
     work_frame = np.empty((H, W, 3), dtype=np.float32)
@@ -351,8 +370,17 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         for f_idx in range(total_frames):
             t = f_idx * dt
-            z = frame_zoom(cam, t, duration)
+            # T5：强度曲线
+            _I = arcmod.intensity_of(arc_cfg, t)
+            _hp = arcmod.hook_peek_factor(spec, t)
+            _eff_I = min(1.0, _I + 0.25 * _hp)
+            fx_sys.particle_scale = arcmod.particle_mult(_eff_I) * (1.0 + 0.5 * _hp)
+            # T5：drop 蓄力段画面同样安静下来（抑制新粒子与涟漪）
+            fx_sys.silenced = arcmod.is_drop_silence(spec, t)
+            z = frame_zoom(cam, t, duration) * arcmod.zoom_mult(_eff_I) * (1.0 + 0.08 * _hp)
             np.copyto(work_frame, bg_cache)
+            # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
+            work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
             fb = work_frame
 
             if trail_on:
@@ -396,7 +424,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     else:
                         trigger = (prev_thetas[i] < 0 <= theta) or (prev_thetas[i] > 0 >= theta)
                     if trigger:
-                        events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.78})
+                        _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.78)
                         note_idx += 1
                         # T3: 过中线 0.5；本帧所有摆同时过零视为"全体对齐" 1.0
                         fx_sys.spawn(t, sx_pre, sy_pre, 0.5, col, palette=accent_rgbs)
@@ -427,6 +455,25 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 _fx1, _fy1 = zoom_at(z, pivot_x, _fy + rel(0.05) * _fk)
                 gfx.draw_line_aa(fb, _fx0, _fy0, _fx1, _fy1,
                                  max(1.0, rel(0.004)), _fc, 0.85 * _fk)
+
+            # T5：arc 特殊事件
+            # countdown：每段开头 0.15 秒内的节拍点 → 全屏闪光 + tick 音频事件
+            for _bp in arcmod.beat_points(spec):
+                if _bp <= t < _bp + 0.15 and not _fired_beats.get(round(_bp, 3)):
+                    _fired_beats[round(_bp, 3)] = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    _emit_event(events, spec, t, notes[note_idx % len(notes)], 1.0)
+                    note_idx += 1
+
+            # drop：u=0.40 爆发一次 —— 闪光 + 震屏 + 粒子大爆发
+            if arc_cfg.preset == "drop" and not _fired_burst:
+                if arcmod.is_drop_burst(spec, t):
+                    _fired_burst = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    fxmod.celebrate_bin(fx_sys, t, W * 0.5, H * 0.5,
+                                        accent_rgbs[0], accent_rgbs, 30)
 
             # T3 视觉反馈：推进生命周期 → 叠加各层效果
             fx_sys.update(t, dt)
@@ -463,8 +510,17 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         for f_idx in range(total_frames):
             t = f_idx * dt
-            z = frame_zoom(cam, t, duration)
+            # T5：强度曲线
+            _I = arcmod.intensity_of(arc_cfg, t)
+            _hp = arcmod.hook_peek_factor(spec, t)
+            _eff_I = min(1.0, _I + 0.25 * _hp)
+            fx_sys.particle_scale = arcmod.particle_mult(_eff_I) * (1.0 + 0.5 * _hp)
+            # T5：drop 蓄力段画面同样安静下来（抑制新粒子与涟漪）
+            fx_sys.silenced = arcmod.is_drop_silence(spec, t)
+            z = frame_zoom(cam, t, duration) * arcmod.zoom_mult(_eff_I) * (1.0 + 0.08 * _hp)
             np.copyto(work_frame, bg_cache)
+            # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
+            work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
             fb = work_frame
 
             if trail_on:
@@ -499,7 +555,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     prev_k = math.floor((prev_angles[i] - trig_rad) / (2.0 * math.pi))
                     curr_k = math.floor((angle - trig_rad) / (2.0 * math.pi))
                     if prev_k != curr_k:
-                        events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.82})
+                        _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.82)
                         note_idx += 1
                         # T3: 过光束 0.6
                         fx_sys.spawn(t, ox_pre, oy_pre, 0.6, col, palette=accent_rgbs)
@@ -529,6 +585,25 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
                 draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("planet", i), t), col, z)
+
+            # T5：arc 特殊事件
+            # countdown：每段开头 0.15 秒内的节拍点 → 全屏闪光 + tick 音频事件
+            for _bp in arcmod.beat_points(spec):
+                if _bp <= t < _bp + 0.15 and not _fired_beats.get(round(_bp, 3)):
+                    _fired_beats[round(_bp, 3)] = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    _emit_event(events, spec, t, notes[note_idx % len(notes)], 1.0)
+                    note_idx += 1
+
+            # drop：u=0.40 爆发一次 —— 闪光 + 震屏 + 粒子大爆发
+            if arc_cfg.preset == "drop" and not _fired_burst:
+                if arcmod.is_drop_burst(spec, t):
+                    _fired_burst = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    fxmod.celebrate_bin(fx_sys, t, W * 0.5, H * 0.5,
+                                        accent_rgbs[0], accent_rgbs, 30)
 
             # T3 视觉反馈：推进生命周期 → 叠加各层效果
             fx_sys.update(t, dt)
@@ -589,8 +664,17 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         for f_idx in range(total_frames):
             t = f_idx * dt
-            z = frame_zoom(cam, t, duration)
+            # T5：强度曲线
+            _I = arcmod.intensity_of(arc_cfg, t)
+            _hp = arcmod.hook_peek_factor(spec, t)
+            _eff_I = min(1.0, _I + 0.25 * _hp)
+            fx_sys.particle_scale = arcmod.particle_mult(_eff_I) * (1.0 + 0.5 * _hp)
+            # T5：drop 蓄力段画面同样安静下来（抑制新粒子与涟漪）
+            fx_sys.silenced = arcmod.is_drop_silence(spec, t)
+            z = frame_zoom(cam, t, duration) * arcmod.zoom_mult(_eff_I) * (1.0 + 0.08 * _hp)
             np.copyto(work_frame, bg_cache)
+            # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
+            work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
             fb = work_frame
 
             if trail_on:
@@ -700,7 +784,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                             if dot < 0:
                                 b_obj["vx"] -= 1.65 * dot * nx
                                 b_obj["vy"] -= 1.65 * dot * ny
-                                events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.65})
+                                _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.65)
                                 note_idx += 1
                                 # T3: 钉子碰撞 0.4
                                 px_s, py_s = zoom_at(z, px * W, py * H)
@@ -720,7 +804,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         bin_counts[slot] += 1
                         b_obj["x"] = (bin_left + (slot + 0.5) * bin_w + ((stack_idx % 3) - 1) * rel(0.026)) / W
                         b_obj["y"] = settle_y + 0.01 - (stack_idx // 3) * 0.024
-                        events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.95})
+                        _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.95)
                         note_idx += 1
                         # T3: 入桶 0.9；整桶满（该桶第 5 个）额外 1.0
                         bx_s, by_s = zoom_at(z, b_obj["x"] * W, b_obj["y"] * H)
@@ -749,6 +833,25 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
                 draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("bin", b_obj["cidx"]), t), col, z)
+
+            # T5：arc 特殊事件
+            # countdown：每段开头 0.15 秒内的节拍点 → 全屏闪光 + tick 音频事件
+            for _bp in arcmod.beat_points(spec):
+                if _bp <= t < _bp + 0.15 and not _fired_beats.get(round(_bp, 3)):
+                    _fired_beats[round(_bp, 3)] = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    _emit_event(events, spec, t, notes[note_idx % len(notes)], 1.0)
+                    note_idx += 1
+
+            # drop：u=0.40 爆发一次 —— 闪光 + 震屏 + 粒子大爆发
+            if arc_cfg.preset == "drop" and not _fired_burst:
+                if arcmod.is_drop_burst(spec, t):
+                    _fired_burst = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    fxmod.celebrate_bin(fx_sys, t, W * 0.5, H * 0.5,
+                                        accent_rgbs[0], accent_rgbs, 30)
 
             # T3 视觉反馈：推进生命周期 → 叠加各层效果
             fx_sys.update(t, dt)
@@ -805,11 +908,21 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         for f_idx in range(total_frames):
             t = f_idx * dt
-            z = frame_zoom(cam, t, duration)
-            angle_rad = math.radians(ar.rotation_deg_per_s * t)
+            # T5：强度曲线
+            _I = arcmod.intensity_of(arc_cfg, t)
+            _hp = arcmod.hook_peek_factor(spec, t)
+            _eff_I = min(1.0, _I + 0.25 * _hp)     # hook_peek 期间按高潮态呈现
+            fx_sys.particle_scale = arcmod.particle_mult(_eff_I) * (1.0 + 0.5 * _hp)
+            # T5：drop 蓄力段画面同样安静下来（抑制新粒子与涟漪）
+            fx_sys.silenced = arcmod.is_drop_silence(spec, t)
+
+            z = frame_zoom(cam, t, duration) * arcmod.zoom_mult(_eff_I) * (1.0 + 0.08 * _hp)
+            angle_rad = math.radians(ar.rotation_deg_per_s * t * arcmod.rotation_mult(_I))
             flash_timer = max(0.0, flash_timer - dt)
 
             np.copyto(work_frame, bg_cache)
+            # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
+            work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
             fb = work_frame
 
             if trail_on:
@@ -842,7 +955,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     _t1 = zoom_at(z, cx + cur_r * math.cos(_a1), cy + cur_r * math.sin(_a1))
                     gfx.draw_line_aa(fb, _t0[0], _t0[1], _t1[0], _t1[1], wall_px * 3, _col)
                 # T4 霓虹边框：外发光 + 细亮线
-                gfx.add_glow(fb, scx, scy, cur_r * z + wall_px * z * 1.6, wall_color, 0.30)
+                gfx.add_glow(fb, scx, scy, cur_r * z + wall_px * z * 1.6, wall_color,
+                             0.30 * arcmod.wall_glow_mult(_eff_I))
                 gfx.draw_ring_aa(fb, scx, scy, cur_r * z, max(1.0, wall_px * z * 0.55), wall_color)
             else:
                 pts = [
@@ -866,9 +980,12 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
             new_balls = []
             for b in balls:
-                b["vy"] += gravity_y * gravity_sign * dt
-                b["x"] += b["vx"] * dt
-                b["y"] += b["vy"] * dt
+                _spd_m = arcmod.speed_mult(_eff_I)
+                if arcmod.is_drop_silence(spec, t):
+                    _spd_m *= 0.4          # T5：drop 蓄力段球速降到 0.4 倍
+                b["vy"] += gravity_y * gravity_sign * dt * _spd_m
+                b["x"] += b["vx"] * dt * _spd_m
+                b["y"] += b["vy"] * dt * _spd_m
 
                 dx, dy = b["x"] - cx, b["y"] - cy
                 dist = math.hypot(dx, dy)
@@ -888,7 +1005,10 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         elif rl.type == "grow_on_bounce":
                             b["r"] = min(cur_r * 0.45, b["r"] * rl.scale_factor)
                         elif rl.type == "split_on_bounce":
-                            if (bounce_count % rl.every_n_bounces == 0
+                            # T5：I 越高分裂越频繁
+                            _eni = max(1, round(rl.every_n_bounces
+                                                * arcmod.split_interval_mult(_eff_I)))
+                            if (bounce_count % _eni == 0
                                     and len(balls) + len(new_balls) < max_count):
                                 _nb = {
                                     "x": b["x"],
@@ -910,7 +1030,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         flash_timer = 0.12
                         # T4：碰撞切换颜色（0.08s 渐变过渡）
                         color_cycler.advance(t)
-                        events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.9})
+                        _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.9)
                         note_idx += 1
 
                         # T3: 碰墙 0.6，分裂 1.0，每第 8 次碰撞额外 +0.2
@@ -965,6 +1085,25 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                                  0.85 * (1.0 - _rk))
 
             balls.extend(new_balls)
+            # T5：arc 特殊事件
+            # countdown：每段开头 0.15 秒内的节拍点 → 全屏闪光 + tick 音频事件
+            for _bp in arcmod.beat_points(spec):
+                if _bp <= t < _bp + 0.15 and not _fired_beats.get(round(_bp, 3)):
+                    _fired_beats[round(_bp, 3)] = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    _emit_event(events, spec, t, notes[note_idx % len(notes)], 1.0)
+                    note_idx += 1
+
+            # drop：u=0.40 爆发一次 —— 闪光 + 震屏 + 粒子大爆发
+            if arc_cfg.preset == "drop" and not _fired_burst:
+                if arcmod.is_drop_burst(spec, t):
+                    _fired_burst = True
+                    fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0,
+                                 accent_rgbs[0], palette=accent_rgbs)
+                    fxmod.celebrate_bin(fx_sys, t, W * 0.5, H * 0.5,
+                                        accent_rgbs[0], accent_rgbs, 30)
+
             # T3 视觉反馈：推进生命周期 → 叠加各层效果
             fx_sys.update(t, dt)
             fx_sys.apply_background_flash(fb)
