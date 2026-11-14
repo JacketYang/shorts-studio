@@ -45,6 +45,9 @@ import {
 import {
   approveAndScheduleRender,
   deleteChannelFromDb,
+  deleteRenderCascade,
+  deleteSpecCascade,
+  deleteIdea,
   executeRenderForSpec,
   expandIdeaRecordToSpec,
   getChannelDataStats,
@@ -1856,6 +1859,84 @@ async function startServer() {
       res.json(result);
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : '删除频道失败' });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // 删除：创意（spec）/ 渲染（render）/ 创意池（idea），同时清理磁盘文件
+  // ---------------------------------------------------------------------------
+  app.delete('/api/specs/:id', (req, res) => {
+    try {
+      const db = loadDb();
+      const result = deleteSpecCascade(db, req.params.id);
+      saveDb(db);
+      res.json({ ok: true, ...result, status: scanStorageArtifacts(db.storage_config, resolveDbPath(db.db_config.json_path)) });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '删除创意失败';
+      res.status(msg.includes('不存在') ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/renders/:id', (req, res) => {
+    try {
+      const db = loadDb();
+      const result = deleteRenderCascade(db, req.params.id);
+      saveDb(db);
+      res.json({ ok: true, ...result, status: scanStorageArtifacts(db.storage_config, resolveDbPath(db.db_config.json_path)) });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '删除渲染记录失败';
+      res.status(msg.includes('不存在') ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/ideas/:id', (req, res) => {
+    try {
+      const db = loadDb();
+      const result = deleteIdea(db, req.params.id);
+      saveDb(db);
+      res.json({ ok: true, ...result });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '删除创意条目失败';
+      res.status(msg.includes('不存在') ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  /** 批量清理内置种子数据（demo/fixture），保留用户真实创作 */
+  app.post('/api/maintenance/purge-seed', (req, res) => {
+    try {
+      const db = loadDb();
+      const keepIds = new Set<string>(Array.isArray(req.body?.keep_spec_ids) ? req.body.keep_spec_ids : []);
+      const seedSpecKeys = new Set([
+        'mb-canon-hexagon-split-0001',
+        'bs-funnel-color-filter-0002',
+        'mb-ode-to-joy-triangle-grow-0003',
+        'pw-harmonic-15-wave-0003',
+        'os-10-planets-resonance-0004',
+      ]);
+      const targets = db.specs.filter((s) => seedSpecKeys.has(s.spec.spec_key) && !keepIds.has(s.id));
+      let deletedFiles = 0;
+      let freedBytes = 0;
+      const removed: Record<string, number> = {};
+      for (const spec of targets) {
+        const r = deleteSpecCascade(db, spec.id);
+        deletedFiles += r.deletedFiles;
+        freedBytes += r.freedBytes;
+        for (const [k, v] of Object.entries(r.removedRecords)) removed[k] = (removed[k] ?? 0) + v;
+      }
+      const seedIdeas = db.ideas.filter((i) => i.batch_id?.startsWith('batch-seed') || i.id.startsWith('idea-seed'));
+      for (const idea of seedIdeas) deleteIdea(db, idea.id);
+      saveDb(db);
+      res.json({
+        ok: true,
+        purgedSpecs: targets.length,
+        purgedIdeas: seedIdeas.length,
+        deletedFiles,
+        freedBytes,
+        removedRecords: removed,
+        status: scanStorageArtifacts(db.storage_config, resolveDbPath(db.db_config.json_path)),
+      });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : '清理内置数据失败' });
     }
   });
 

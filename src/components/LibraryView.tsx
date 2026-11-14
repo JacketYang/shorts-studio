@@ -12,6 +12,7 @@ import {
   Shuffle,
   Sliders,
   Sparkles,
+  Trash2,
   Volume2,
 } from 'lucide-react';
 import { midiToFreq, parseNoteSequence } from '../domain/melodies';
@@ -413,6 +414,76 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ state, onRefresh, onNa
     }
   };
 
+  const handleDeleteSpec = async (specId: string, title: string) => {
+    const ok = window.confirm(
+      `确定删除创意「${title}」？\n\n将同时删除：\n· 该创意的全部渲染记录\n· 磁盘上的 MP4 成品与缓存文件\n· 关联的审核、视频、评论条目\n\n此操作不可撤销。`
+    );
+    if (!ok) return;
+    setBusy(true);
+    setAiMessage(null);
+    try {
+      const res = await fetch(`/api/specs/${specId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        setAiMessage(data.error ?? '删除失败');
+      } else {
+        const mb = ((data.freedBytes ?? 0) / 1048576).toFixed(1);
+        setAiMessage(
+          `已删除创意「${title}」：清理 ${data.deletedFiles ?? 0} 个文件（释放 ${mb} MB）` +
+            (data.removedRecords?.renders ? `，${data.removedRecords.renders} 条渲染记录` : '')
+        );
+        await onRefresh();
+      }
+    } catch (err) {
+      setAiMessage(err instanceof Error ? err.message : '网络错误');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteIdea = async (ideaId: string, text: string) => {
+    const ok = window.confirm(`确定删除这条创意？\n\n${text.slice(0, 80)}${text.length > 80 ? '…' : ''}`);
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/ideas/${ideaId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) setAiMessage(data.error ?? '删除失败');
+      else {
+        setAiMessage('创意已从创意池删除');
+        await onRefresh();
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePurgeSeedData = async () => {
+    const ok = window.confirm(
+      '将删除工作台内置的 5 条示例创意（demo fixture）及其全部渲染产物、磁盘文件。\n\n你自己导入或 AI 生成的创意不受影响。确定继续？'
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch('/api/maintenance/purge-seed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok) setAiMessage(data.error ?? '清理失败');
+      else {
+        const mb = ((data.freedBytes ?? 0) / 1048576).toFixed(1);
+        setAiMessage(
+          `已清理内置示例：${data.purgedSpecs} 条创意、${data.purgedIdeas} 条创意池条目，释放 ${mb} MB`
+        );
+        await onRefresh();
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleExpandIdea = async (ideaId: string) => {
     setBusy(true);
     setAiMessage(null);
@@ -541,6 +612,21 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ state, onRefresh, onNa
       {/* Specs Table */}
       {subTab === 'specs' && (
         <div className="rounded-lg border border-slate-200 bg-white overflow-x-auto">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5">
+            <div className="text-xs text-slate-600">
+              共 <span className="font-semibold text-slate-900">{state.specs.length}</span> 条创意
+              <span className="ml-2 text-slate-400">删除创意会一并清理渲染记录与磁盘上的 MP4 / 缓存</span>
+            </div>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handlePurgeSeedData}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 whitespace-nowrap"
+            >
+              <Trash2 className="h-3 w-3" />
+              清理内置示例数据
+            </button>
+          </div>
           <table className="w-full text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
@@ -579,6 +665,16 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ state, onRefresh, onNa
                     >
                       <Play className="h-3 w-3" />
                       渲染
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleDeleteSpec(item.id, item.spec.publish.title)}
+                      title="删除创意及其渲染产物与磁盘文件"
+                      className="ml-1.5 inline-flex items-center gap-1 rounded-md border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 whitespace-nowrap shrink-0"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      删除
                     </button>
                   </td>
                 </tr>

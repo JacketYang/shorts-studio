@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle2, Copy, Download, Film, RefreshCw, ShieldAlert, XCircle } from 'lucide-react';
+import { CheckCircle2, Copy, Download, Film, RefreshCw, ShieldAlert, Trash2, XCircle } from 'lucide-react';
 import type { StudioState } from '../types/ui';
 import { SimulationPlayer } from './SimulationPlayer';
 
@@ -38,6 +38,28 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
       const data = await res.json();
       await onRefresh();
       if (data.render?.id) setSelectedRenderId(data.render.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteRender = async (renderId: string, title: string) => {
+    const ok = window.confirm(
+      `确定删除这条渲染记录？\n\n「${title}」\n\n将同时删除磁盘上的 MP4 与缓存文件，创意本身保留。`
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/renders/${renderId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        window.alert(data.error ?? '删除失败');
+      } else {
+        const mb = ((data.freedBytes ?? 0) / 1048576).toFixed(1);
+        window.alert(`已删除渲染记录，清理 ${data.deletedFiles ?? 0} 个文件（释放 ${mb} MB）`);
+        if (selectedRenderId === renderId) setSelectedRenderId('');
+        await onRefresh();
+      }
     } finally {
       setBusy(false);
     }
@@ -159,6 +181,18 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
                         className="rounded border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-50"
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          handleDeleteRender(rnd.id, spec?.spec.publish.title ?? rnd.spec_id)
+                        }
+                        aria-label={`删除渲染 ${rnd.id}`}
+                        title="删除渲染记录与磁盘文件"
+                        className="rounded border border-rose-200 bg-white p-1.5 text-rose-600 hover:bg-rose-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   </div>

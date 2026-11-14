@@ -1588,6 +1588,170 @@ export function getChannelDataStats(db: StudioDatabase, channelId: string): Chan
   };
 }
 
+
+/**
+ * 删除单条创意（Spec）及其全部关联：渲染记录、成品 MP4、缓存文件、评论/审核/视频条目。
+ * 由 idea→spec、spec→render、render→video 的链路逐级清理，避免留下孤儿数据。
+ */
+export function deleteSpecCascade(
+  db: StudioDatabase,
+  specId: string,
+  options: { skipDiskCleanup?: boolean } = {}
+): {
+  deletedSpecId: string;
+  deletedFiles: number;
+  freedBytes: number;
+  removedRecords: Record<string, number>;
+} {
+  const spec = db.specs.find((s) => s.id === specId);
+  if (!spec) throw new Error('目标创意不存在');
+
+  const removed: Record<string, number> = {};
+  const bump = (k: string, n: number) => {
+    if (n > 0) removed[k] = (removed[k] ?? 0) + n;
+  };
+
+  // 1) 找出该 spec 的所有渲染记录（含磁盘文件）
+  const renderIds = db.renders.filter((r) => r.spec_id === specId).map((r) => r.id);
+  const videoIds = db.videos.filter((v) => v.spec_id === specId || (v.render_id && renderIds.includes(v.render_id)));
+  const compilations = db.compilations.filter((c) => c.render_ids?.some((id) => renderIds.includes(id)));
+
+  // 2) 级联删除数据库记录
+  const beforeVideos = db.videos.length;
+  db.videos = db.videos.filter((v) => !(v.spec_id === specId || (v.render_id && renderIds.includes(v.render_id))));
+  bump('videos', beforeVideos - db.videos.length);
+
+  const beforeReviews = db.reviews.length;
+  db.reviews = db.reviews.filter((r) => r.spec_id !== specId);
+  bump('reviews', beforeReviews - db.reviews.length);
+
+  const beforeComments = db.comments.length;
+  db.comments = db.comments.filter(
+    (c) => !(c.yt_video_id && videoIds.some((v) => v.yt_video_id === c.yt_video_id))
+  );
+  bump('comments', beforeComments - db.comments.length);
+
+  const beforeRenders = db.renders.length;
+  db.renders = db.renders.filter((r) => r.spec_id !== specId);
+  bump('renders', beforeRenders - db.renders.length);
+
+  const beforeJobs = db.jobs.length;
+  db.jobs = db.jobs.filter((j) => (j.payload as { spec_id?: string } | undefined)?.spec_id !== specId);
+  bump('jobs', beforeJobs - db.jobs.length);
+
+  const beforeCompilations = db.compilations.length;
+  db.compilations = db.compilations.filter((c) => !compilations.includes(c));
+  bump('compilations', beforeCompilations - db.compilations.length);
+
+  // 3) 断开创意池引用（保留 idea 本身，只清 spec_id）
+  for (const idea of db.ideas) {
+    if (idea.spec_id === specId) {
+      idea.spec_id = null;
+      if (idea.status === 'expanded') idea.status = 'pending';
+    }
+  }
+
+  // 4) 删除 spec 本体
+  const beforeSpecs = db.specs.length;
+  db.specs = db.specs.filter((s) => s.id !== specId);
+  bump('specs', beforeSpecs - db.specs.length);
+
+  // 5) 磁盘清理：renders / cache / compilations / tmp
+  let deletedFiles = 0;
+  let freedBytes = 0;
+  if (!options.skipDiskCleanup) {
+    const cleanup = cleanupChannelMediaFiles({
+      cfg: db.storage_config,
+      renderIds,
+      compilationIds: compilations.map((c) => c.id),
+    });
+    deletedFiles = cleanup.deletedCount;
+    freedBytes = cleanup.freedBytes;
+  }
+
+  db.audit_log.unshift({
+    id: `aud-${Date.now().toString(36)}`,
+    channel_id: spec.channel_id,
+    actor: 'operator@shorts-studio',
+    action: 'spec_deleted',
+    entity: specId,
+    payload: {
+      spec_key: spec.spec.spec_key,
+      title: spec.spec.publish?.title,
+      render_ids: renderIds,
+      removed_records: removed,
+      deleted_files: deletedFiles,
+      freed_bytes: freedBytes,
+    },
+    at: new Date().toISOString(),
+  });
+
+  return { deletedSpecId: specId, deletedFiles, freedBytes, removedRecords: removed };
+}
+
+/**
+ * 删除单条渲染记录及其磁盘文件（保留 spec）。
+ */
+export function deleteRenderCascade(
+  db: StudioDatabase,
+  renderId: string,
+  options: { skipDiskCleanup?: boolean } = {}
+): { deletedRenderId: string; deletedFiles: number; freedBytes: number } {
+  const render = db.renders.find((r) => r.id === renderId);
+  if (!render) throw new Error('目标渲染记录不存在');
+
+  db.renders = db.renders.filter((r) => r.id !== renderId);
+  const beforeVideos = db.videos.length;
+  db.videos = db.videos.filter((v) => v.render_id !== renderId);
+  const removedVideos = beforeVideos - db.videos.length;
+
+  let deletedFiles = 0;
+  let freedBytes = 0;
+  if (!options.skipDiskCleanup) {
+    const cleanup = cleanupChannelMediaFiles({
+      cfg: db.storage_config,
+      renderIds: [renderId],
+      compilationIds: [],
+    });
+    deletedFiles = cleanup.deletedCount;
+    freedBytes = cleanup.freedBytes;
+  }
+
+  db.audit_log.unshift({
+    id: `aud-${Date.now().toString(36)}`,
+    channel_id: render.channel_id,
+    actor: 'operator@shorts-studio',
+    action: 'render_deleted',
+    entity: renderId,
+    payload: { removed_videos: removedVideos, deleted_files: deletedFiles, freed_bytes: freedBytes },
+    at: new Date().toISOString(),
+  });
+
+  return { deletedRenderId: renderId, deletedFiles, freedBytes };
+}
+
+/**
+ * 删除一条创意池条目（Idea）。
+ */
+export function deleteIdea(
+  db: StudioDatabase,
+  ideaId: string
+): { deletedIdeaId: string } {
+  const idea = db.ideas.find((i) => i.id === ideaId);
+  if (!idea) throw new Error('目标创意条目不存在');
+  db.ideas = db.ideas.filter((i) => i.id !== ideaId);
+  db.audit_log.unshift({
+    id: `aud-${Date.now().toString(36)}`,
+    channel_id: idea.channel_id,
+    actor: 'operator@shorts-studio',
+    action: 'idea_deleted',
+    entity: ideaId,
+    payload: { had_spec: Boolean(idea.spec_id) },
+    at: new Date().toISOString(),
+  });
+  return { deletedIdeaId: ideaId };
+}
+
 export function deleteChannelFromDb(
   db: StudioDatabase,
   channelId: string,
