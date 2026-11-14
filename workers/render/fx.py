@@ -193,7 +193,8 @@ class FxSystem:
 
         # 1) 背景闪光（只记录强度，逐帧衰减）
         if cfg.flash > 0:
-            self.flash_val = min(1.0, self.flash_val + (0.06 + 0.10 * i) * cfg.flash)
+            # 上限 0.35：密集碰撞时不再累积成白屏（原 1.0 会让整帧 +255）
+            self.flash_val = min(0.35, self.flash_val + (0.06 + 0.10 * i) * cfg.flash)
             self.flash_color = color
 
         # 2) 涟漪
@@ -295,7 +296,7 @@ class FxSystem:
         """背景闪光：整体提亮（加色）。"""
         if self.flash_val <= 0.0:
             return
-        amt = self.flash_val * 255.0
+        amt = self.flash_val * 150.0
         col = self.flash_color
         # 按颜色比例轻微着色，避免纯白死板
         mx = max(1, max(col))
@@ -341,3 +342,39 @@ class FxSystem:
         amp = self.shake_amp * decay
         phase = 2.0 * math.pi * SHAKE_FREQ * age
         return amp * math.sin(phase), amp * math.cos(phase * 1.31)
+
+def celebrate_bin(fx_sys, t, x, y, color, palette, particle_count: int = 30) -> None:
+    """整桶庆祝：涟漪 + 指定数量粒子。
+
+    任务允许庆祝时把粒子上限临时放宽到 90，这里先抬到 90、
+    生成完毕后再回落到常规上限（超出部分按时间丢弃最早的）。
+    """
+    global MAX_PARTICLES
+    if fx_sys.cfg.disabled:
+        return
+
+    # 涟漪
+    if fx_sys.cfg.ripple > 0:
+        fx_sys.ripples.append(Ripple(x, y, t, color, fx_sys.cfg.ripple))
+
+    # 粒子：临时放宽上限
+    if fx_sys.cfg.particles > 0:
+        old_cap = MAX_PARTICLES
+        MAX_PARTICLES = 90
+        try:
+            for _ in range(particle_count):
+                ang = fx_sys.rng.uniform(0.0, 2.0 * math.pi)
+                spd = fx_sys.rng.uniform(0.18, 0.42) * fx_sys.w
+                pcol = color if fx_sys.rng.random() < 0.6 else palette[fx_sys.rng.randrange(len(palette))]
+                fx_sys.particles.append(Particle(
+                    x, y,
+                    math.cos(ang) * spd, math.sin(ang) * spd,
+                    t, fx_sys.rng.uniform(0.45, 0.75),
+                    fx_sys.rng.uniform(3.5, 5.0),
+                    pcol,
+                ))
+            if len(fx_sys.particles) > MAX_PARTICLES:
+                fx_sys.particles = fx_sys.particles[-MAX_PARTICLES:]
+        finally:
+            MAX_PARTICLES = old_cap
+

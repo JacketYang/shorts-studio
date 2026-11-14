@@ -24,6 +24,7 @@ import numpy as np  # noqa: E402
 
 import fx as fxmod  # noqa: E402
 import gfx  # noqa: E402
+import theme as thememod  # noqa: E402
 import spec_params  # noqa: E402
 from spec_params import (  # noqa: E402
     load_params,
@@ -195,10 +196,17 @@ class TrailBuffer:
         gfx.accumulate_glow_hue_safe(self.buf, cx, cy, r, rgb, strength)
 
 
-def draw_ball(fb, cx: float, cy: float, r: float, rgb, z: float = 1.0) -> None:
-    """画一个球：光晕 + 本体 + 左上高光。"""
+def scale_brightness_local(rgb, factor: float):
+    """按比例调整亮度（用于太阳本体比主题色略亮）。"""
+    return tuple(max(0, min(255, int(c * factor))) for c in rgb)
+
+
+def draw_ball(fb, cx: float, cy: float, r: float, rgb, z: float = 1.0,
+              glow_scale: float = 1.0) -> None:
+    """画一个球：光晕 + 本体 + 左上高光。glow_scale 用于球多时降低发光避免发白。"""
     # 光晕（加色，带软饱和保护）
-    gfx.accumulate_glow_hue_safe(fb, cx, cy, r * GLOW_RADIUS_FACTOR, rgb, GLOW_STRENGTH)
+    _glow_r = r * GLOW_RADIUS_FACTOR * (0.6 + 0.4 * glow_scale)
+    gfx.accumulate_glow_hue_safe(fb, cx, cy, _glow_r, rgb, GLOW_STRENGTH * glow_scale)
     # 本体（抗锯齿实心圆）
     gfx.draw_disc_aa(fb, cx, cy, r, rgb)
     # 高光：偏左上 30% 半径，半径 25%，白色 alpha 0.55
@@ -278,12 +286,16 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
     total_frames = max(1, int(fps * duration))
     dt = 1.0 / fps
 
-    accent_rgbs = [hex_to_rgb(c, (56, 189, 248)) for c in P.style.palette]
+    # T4：统一视觉主题（渐变背景 + bokeh 光斑 + 配色 + 墙体/文字色）
+    theme_rng = derive_rng(P.seed, "theme")
+    theme = thememod.get_theme(spec, W, H, theme_rng)
+
+    accent_rgbs = list(theme.palette)
     if not accent_rgbs:
         accent_rgbs = [(56, 189, 248), (244, 114, 182), (251, 191, 36)]
 
-    # 背景缓存：整段只生成一次
-    bg_cache = build_background(P.style.background, W, H)
+    # 背景缓存：整段只生成一次（渐变 + 光斑）
+    bg_cache = theme.build_background()
 
     # 旋律音高 + transpose（半音）
     notes = []
@@ -329,6 +341,13 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
         pivot_y = H * 0.20
         prev_thetas = [0.0] * count
         bob_r = rel(0.013)
+        # T4：中线闪光记录 (y, t0, color)
+        _flash_ys: list = []
+        _last_flash_t = -1e9
+        FLASH_LIFE = 0.12
+        # T4：长拖尾光幕（fade 0.92），独立于 spec.trail
+        ghost_buf = np.zeros((H, W, 3), dtype=np.float32)
+        GHOST_FADE = 0.92
 
         for f_idx in range(total_frames):
             t = f_idx * dt
@@ -340,6 +359,9 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 trail_buf.decay(trail_fade)
             else:
                 trail_buf.clear()
+
+            # T4：光幕缓冲衰减
+            ghost_buf *= GHOST_FADE
 
             # 中枢参考线与顶部枢轴横杆
             p0 = zoom_at(z, pivot_x, pivot_y)
@@ -358,7 +380,10 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 pend_len = min(0.62, pd.length_min + i * pd.length_step) * H
                 raw_x = pivot_x + math.sin(theta) * pend_len * 0.48
                 raw_y = pivot_y + math.cos(theta) * pend_len
-                col = accent_rgbs[i % len(accent_rgbs)]
+                # T4：摆球颜色沿序号做调色板渐变（不是循环取色）
+                col = thememod.palette_gradient(accent_rgbs, i / max(1, count - 1))
+                sx, sy = zoom_at(z, raw_x, raw_y)
+                sx_pre, sy_pre = sx, sy
 
                 if f_idx > 0:
                     if P.note_trigger.on == "peak_reversal":
@@ -375,18 +400,33 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         note_idx += 1
                         # T3: 过中线 0.5；本帧所有摆同时过零视为"全体对齐" 1.0
                         fx_sys.spawn(t, sx_pre, sy_pre, 0.5, col, palette=accent_rgbs)
+                        # T4：中线对应位置出现短促垂直闪光线
+                        _fl = max(0.0, 1.0 - (t - _last_flash_t) / 0.12)
+                        if _fl <= 0.0:
+                            _last_flash_t = t
+                            _flash_ys.append((sy_pre, t, col))
                 prev_thetas[i] = theta
 
                 l0 = zoom_at(z, pivot_x, pivot_y)
                 l1 = zoom_at(z, raw_x, raw_y)
-                gfx.draw_line_aa(fb, l0[0], l0[1], l1[0], l1[1], 1.0, (100, 116, 139))
+                # T4：摆线透明度 0.35
+                gfx.draw_line_aa(fb, l0[0], l0[1], l1[0], l1[1], 1.0, theme.ui_color, 0.35)
 
-                sx, sy = zoom_at(z, raw_x, raw_y)
-                sx_pre, sy_pre = sx, sy
                 sr = bob_r * z
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
+                # T4：写入"光幕"缓冲，形成长拖尾
+                gfx.accumulate_glow_hue_safe(ghost_buf, sx, sy, sr * 2.6, col, 0.55)
                 draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("pend", i), t), col, z)
+
+            # T4：中线闪光（短促垂直光线）
+            _flash_ys = [f for f in _flash_ys if t - f[1] < FLASH_LIFE]
+            for _fy, _ft, _fc in _flash_ys:
+                _fk = 1.0 - (t - _ft) / FLASH_LIFE
+                _fx0, _fy0 = zoom_at(z, pivot_x, _fy - rel(0.05) * _fk)
+                _fx1, _fy1 = zoom_at(z, pivot_x, _fy + rel(0.05) * _fk)
+                gfx.draw_line_aa(fb, _fx0, _fy0, _fx1, _fy1,
+                                 max(1.0, rel(0.004)), _fc, 0.85 * _fk)
 
             # T3 视觉反馈：推进生命周期 → 叠加各层效果
             fx_sys.update(t, dt)
@@ -395,7 +435,13 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             fx_sys.draw_particles(fb, t)
             gfx.apply_vignette(fb, fx_cfg.vignette)
             _dx, _dy = fx_sys.shake_offset(t)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
+            # T4：叠加光幕拖尾
+            _comp = trail_buf.buf if trail_on else None
+            if _comp is None:
+                _comp = ghost_buf
+            else:
+                _comp = _comp + ghost_buf
+            proc.stdin.write(composer.compose(fb, _comp,
                                               shift=(_dx, _dy), bg=bg_cache))
 
     # =====================================================================
@@ -427,10 +473,15 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 trail_buf.clear()
 
             beam_r = W * 0.46
+            # T4：中心"太阳"呼吸 ±8%（以 3Hz 节拍为参考）
+            _sun_breath = 1.0 + 0.08 * math.sin(t * 2.0 * math.pi * 3.0)
             scx, scy = zoom_at(z, cx, cy)
             bex, bey = zoom_at(z, cx + math.cos(trig_rad) * beam_r, cy + math.sin(trig_rad) * beam_r)
             gfx.draw_line_aa(fb, scx, scy, bex, bey, 2.0, (226, 232, 240))
-            gfx.draw_disc_aa(fb, scx, scy, rel(0.012) * z, (248, 250, 252))
+            # T4：太阳外发光 + 呼吸本体
+            gfx.add_glow(fb, scx, scy, rel(0.045) * z * _sun_breath, theme.ui_color, 0.55)
+            gfx.draw_disc_aa(fb, scx, scy, rel(0.012) * z * _sun_breath,
+                             scale_brightness_local(theme.ui_color, 1.15))
 
             pulse = (1.0 + 0.06 * math.sin(t * 3.0)) if rule_type == "pulse_rings" else 1.0
 
@@ -440,7 +491,9 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 angle = trig_rad - 0.16 - i * 0.07 + omega * t
                 ring_r = min(0.44, base_r + i * step_r) * W * pulse
                 col = accent_rgbs[i % len(accent_rgbs)]
-                gfx.draw_ring_aa(fb, scx, scy, ring_r * z, max(1.0, rel(0.004)), (51, 65, 85))
+                # T4：轨道环透明度 0.18 的细环
+                gfx.draw_ring_aa(fb, scx, scy, ring_r * z, max(1.0, rel(0.004)),
+                                 theme.ui_color, 0.18)
 
                 if f_idx > 0:
                     prev_k = math.floor((prev_angles[i] - trig_rad) / (2.0 * math.pi))
@@ -450,6 +503,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         note_idx += 1
                         # T3: 过光束 0.6
                         fx_sys.spawn(t, ox_pre, oy_pre, 0.6, col, palette=accent_rgbs)
+                        # T4：光束在该位置爆一个闪光点
+                        _bvx = cx + math.cos(trig_rad) * ring_r
+                        _bvy = cy + math.sin(trig_rad) * ring_r
+                        _bsx, _bsy = zoom_at(z, _bvx, _bvy)
+                        gfx.add_glow(fb, _bsx, _bsy, rel(0.030) * z, col, 0.9)
                 prev_angles[i] = angle
 
                 raw_x = cx + math.cos(angle) * ring_r
@@ -457,6 +515,16 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 sx, sy = zoom_at(z, raw_x, raw_y)
                 ox_pre, oy_pre = sx, sy
                 sr = planet_r * z
+
+                # T4：行星各自拖尾弧线（沿最近若干个历史角度）
+                for _tk in range(1, 7):
+                    _ta = angle - omega * dt * _tk * 1.6
+                    _trx = cx + math.cos(_ta) * ring_r
+                    _try_ = cy + math.sin(_ta) * ring_r
+                    _tsx, _tsy = zoom_at(z, _trx, _try_)
+                    _tk_fade = 0.42 * (1.0 - _tk / 7.0)
+                    gfx.draw_disc_aa(fb, _tsx, _tsy, max(0.8, sr * (0.85 - 0.09 * _tk)),
+                                     col, _tk_fade)
 
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
@@ -510,6 +578,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
         active_balls = []
         spawn_interval = max(4, total_frames // (ball_count + 4))
         bin_counts = [0] * num_bins
+        # T4：钉子受击记录 {peg_index: t_hit}，亮度 1.0 后 0.3s 衰减到 0.45
+        peg_hits: dict = {}
+        PEG_BASE = 0.45
+        PEG_DECAY = 0.30
+        BIN_FULL = max(1, ball_count // num_bins)
         ball_r = rel(0.020)
         peg_r = rel(0.011)
         bin_h = 0.13 * H
@@ -544,19 +617,49 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             gfx.draw_line_aa(fb, fl0[0], fl0[1], fl1[0], fl1[1], rel(0.006), (148, 163, 184))
             gfx.draw_line_aa(fb, fr0[0], fr0[1], fr1[0], fr1[1], rel(0.006), (148, 163, 184))
 
-            for px, py in pegs:
+            for _pi, (px, py) in enumerate(pegs):
                 sx, sy = zoom_at(z, px * W, py * H)
-                gfx.draw_disc_aa(fb, sx, sy, peg_r * z, (148, 163, 184))
+                # T4：默认亮度 0.45；受击后跳到 1.0，0.3s 内衰减回 0.45
+                _hit = peg_hits.get(_pi)
+                if _hit is not None:
+                    _age = t - _hit
+                    if _age >= PEG_DECAY:
+                        _b = PEG_BASE
+                        peg_hits.pop(_pi, None)
+                    else:
+                        _k = 1.0 - _age / PEG_DECAY
+                        _b = PEG_BASE + (1.0 - PEG_BASE) * _k
+                        gfx.add_glow(fb, sx, sy, peg_r * z * 4.0, theme.ui_color, 0.5 * _k)
+                else:
+                    _b = PEG_BASE
+                _pcol = tuple(min(255, int(c * _b)) for c in theme.ui_color)
+                gfx.draw_disc_aa(fb, sx, sy, peg_r * z, _pcol)
 
-            # 桶
-            for b in range(num_bins):
-                bx, by = bin_positions[b]
+            # 桶：半透明玻璃感（填充 α0.12 + 亮边线），堆积越高发光越强
+            for _bi in range(num_bins):
+                bx, by = bin_positions[_bi]
+                _bcolor = bin_rgbs[_bi % len(bin_rgbs)]
+                _fill_ratio = min(1.0, bin_counts[_bi] / BIN_FULL)
                 o0 = zoom_at(z, bx + rel(0.006), by)
-                gfx.draw_rect_outline_aa(
-                    fb, o0[0], o0[1],
-                    (bin_w - rel(0.012)) * z, bin_h * z,
-                    bin_rgbs[b % len(bin_rgbs)], max(1.0, rel(0.005)),
-                )
+                _bw = (bin_w - rel(0.012)) * z
+                _bh = bin_h * z
+
+                # 玻璃填充
+                x0 = int(max(0, o0[0]))
+                y0 = int(max(0, o0[1]))
+                x1 = int(min(W, o0[0] + _bw))
+                y1 = int(min(H, o0[1] + _bh))
+                if x1 > x0 and y1 > y0:
+                    region = fb[y0:y1, x0:x1, :]
+                    region += (np.asarray(_bcolor, dtype=np.float32)[None, None, :] - region) * 0.12
+
+                # 装满程度越高的桶，发光越强
+                if _fill_ratio > 0.01:
+                    gfx.add_glow(fb, o0[0] + _bw * 0.5, o0[1] + _bh * 0.5,
+                                 max(_bw, _bh) * 0.55, _bcolor, 0.35 * _fill_ratio)
+
+                gfx.draw_rect_outline_aa(fb, o0[0], o0[1], _bw, _bh, _bcolor,
+                                         max(1.0, rel(0.005)))
 
             # 移动挡板
             gate_x_norm = None
@@ -585,10 +688,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         b_obj["x"] = 0.88
                         b_obj["vx"] = -abs(b_obj["vx"]) * 0.85
 
-                    for px, py in pegs:
+                    for _pi, (px, py) in enumerate(pegs):
                         dx, dy = b_obj["x"] - px, b_obj["y"] - py
                         d = math.hypot(dx, dy)
                         if 0 < d < 0.03:
+                            peg_hits[_pi] = t
                             nx, ny = dx / d, dy / d
                             b_obj["x"] = px + nx * 0.031
                             b_obj["y"] = py + ny * 0.031
@@ -623,12 +727,25 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         _bcol = bin_rgbs[b_obj["cidx"] % len(bin_rgbs)]
                         fx_sys.spawn(t, bx_s, by_s, 0.9, _bcol, palette=bin_rgbs,
                                      ball_key=("bin", b_obj["cidx"]))
-                        if bin_counts[slot] % 5 == 0:
-                            fx_sys.spawn(t, bx_s, by_s, 1.0, _bcol, palette=bin_rgbs)
+                        # T4：整桶庆祝——该桶达到 球数/桶数 时触发一次
+                        if bin_counts[slot] == BIN_FULL:
+                            fxmod.celebrate_bin(fx_sys, t, bx_s, by_s, _bcol, bin_rgbs, 30)
 
                 sx, sy = zoom_at(z, b_obj["x"] * W, b_obj["y"] * H)
                 sr = ball_r * z
                 col = bin_rgbs[b_obj["cidx"] % len(bin_rgbs)]
+
+                # T4：飞行中保留速度方向的 3 点拉伸（速度越快越长）
+                if not b_obj["settled"]:
+                    _spd = math.hypot(b_obj["vx"], b_obj["vy"])
+                    _stretch = min(3.2, 1.0 + _spd * 6.0)
+                    for _si in (1, 2):
+                        _k = _si / 3.0
+                        _tx = b_obj["x"] - b_obj["vx"] * dt * _k * _stretch
+                        _ty = b_obj["y"] - b_obj["vy"] * dt * _k * _stretch
+                        _tsx, _tsy = zoom_at(z, _tx * W, _ty * H)
+                        gfx.draw_disc_aa(fb, _tsx, _tsy, sr * (1.0 - 0.22 * _k), col, 0.55 - 0.15 * _k)
+
                 if trail_on:
                     trail_buf.stamp(sx, sy, sr * GLOW_RADIUS_FACTOR, col, GLOW_STRENGTH)
                 draw_ball(fb, sx, sy, sr * fx_sys.pop_scale(("bin", b_obj["cidx"]), t), col, z)
@@ -664,6 +781,12 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         init_rng = derive_rng(P.seed, "balls")
 
+        # T4：球碰撞后颜色切换到调色板下一个（0.08s 渐变）
+        color_cycler = thememod.ColorCycler(accent_rgbs)
+        # T4：新球出生时的"生成闪光环"，记录 (x, y, t0, color)
+        spawn_rings: list = []
+        SPAWN_RING_LIFE = 0.30
+
         balls = []
         for _ in range(bl.count_start):
             balls.append({
@@ -694,9 +817,17 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             else:
                 trail_buf.clear()
 
-            wall_color = accent_rgbs[bounce_count % len(accent_rgbs)] if flash_timer > 0 else (203, 213, 225)
+            # T4：墙体默认色取主题色（调色板第一色 85% 亮度），不再是写死灰色
+            wall_color = accent_rgbs[bounce_count % len(accent_rgbs)] if flash_timer > 0 else theme.ui_color
             cur_r = arena_r * (max(0.62, 1.0 - bounce_count * 0.008) if rl.type == "shrink_wall" else 1.0)
             scx, scy = zoom_at(z, cx, cy)
+
+            # T4：场地内部极淡同心圆（α0.05），随球数增长缓慢向内脉动
+            _nball = len(balls)
+            _pulse = 1.0 - 0.06 * (0.5 + 0.5 * math.sin(t * 1.2)) * min(1.0, _nball / 16.0)
+            for _k in (0.35, 0.52, 0.70, 0.88):
+                gfx.draw_ring_aa(fb, scx, scy, cur_r * z * _k * _pulse,
+                                 max(0.8, wall_px * 0.5), theme.ui_color, 0.05)
             if sides == 0:
                 # T3 墙体点亮：按 24 段分别绘制，命中的段加亮并加粗
                 for _seg in range(fxmod.WALL_SEGMENTS):
@@ -710,7 +841,9 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     _t0 = zoom_at(z, cx + cur_r * math.cos(_a0), cy + cur_r * math.sin(_a0))
                     _t1 = zoom_at(z, cx + cur_r * math.cos(_a1), cy + cur_r * math.sin(_a1))
                     gfx.draw_line_aa(fb, _t0[0], _t0[1], _t1[0], _t1[1], wall_px * 3, _col)
-                gfx.draw_ring_aa(fb, scx, scy, cur_r * z, wall_px * z, wall_color)
+                # T4 霓虹边框：外发光 + 细亮线
+                gfx.add_glow(fb, scx, scy, cur_r * z + wall_px * z * 1.6, wall_color, 0.30)
+                gfx.draw_ring_aa(fb, scx, scy, cur_r * z, max(1.0, wall_px * z * 0.55), wall_color)
             else:
                 pts = [
                     zoom_at(z,
@@ -727,7 +860,9 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         _bright, _bcol = _boost
                         _col = tuple(min(255, int(c * (0.45 + 0.55 * _bright))) for c in _bcol)
                         gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], wall_px * 3, _col)
-                    gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], wall_px, wall_color)
+                    # T4 霓虹边框：先铺一层加色发光，再压一条细亮线
+                    gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], wall_px * 2.4, wall_color, 0.22)
+                    gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], max(1.0, wall_px * 0.55), wall_color)
 
             new_balls = []
             for b in balls:
@@ -755,7 +890,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         elif rl.type == "split_on_bounce":
                             if (bounce_count % rl.every_n_bounces == 0
                                     and len(balls) + len(new_balls) < max_count):
-                                new_balls.append({
+                                _nb = {
                                     "x": b["x"],
                                     "y": b["y"],
                                     "vx": -b["vx"] * 0.92 + init_rng.uniform(-rel(0.065), rel(0.065)),
@@ -763,13 +898,18 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                                     "r": max(rel(0.011), b["r"] * 0.92),
                                     "color": accent_rgbs[(len(balls) + len(new_balls)) % len(accent_rgbs)],
                                     "trail": [],
-                                })
+                                }
+                                new_balls.append(_nb)
+                                # T4：生成闪光环
+                                spawn_rings.append((_nb["x"], _nb["y"], t, _nb["color"]))
                         elif rl.type == "gravity_flip":
                             if bounce_count % rl.every_n_bounces == 0:
                                 gravity_sign *= -1.0
 
                         bounce_count += 1
                         flash_timer = 0.12
+                        # T4：碰撞切换颜色（0.08s 渐变过渡）
+                        color_cycler.advance(t)
                         events.append({"t": t, "midi": notes[note_idx % len(notes)], "intensity": 0.9})
                         note_idx += 1
 
@@ -796,9 +936,33 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
                 sbx, sby = zoom_at(z, b["x"], b["y"])
                 sr = b["r"] * z
+
+                # T4：球色跟随颜色循环；球数 >12 时发光降到 0.7 倍避免发白
+                _bcol = color_cycler.current(t) if b.get("use_cycle", True) else b["color"]
+                _n = len(balls)
+                if _n > 48:
+                    _glow_k = 0.32
+                elif _n > 30:
+                    _glow_k = 0.45
+                elif _n > 12:
+                    _glow_k = 0.7
+                else:
+                    _glow_k = 1.0
+
                 if trail_on:
-                    trail_buf.stamp(sbx, sby, sr * GLOW_RADIUS_FACTOR, b["color"], GLOW_STRENGTH)
-                draw_ball(fb, sbx, sby, sr * fx_sys.pop_scale(("ball", id(b)), t), b["color"], z)
+                    trail_buf.stamp(sbx, sby, sr * GLOW_RADIUS_FACTOR, _bcol,
+                                    GLOW_STRENGTH * _glow_k)
+                draw_ball(fb, sbx, sby, sr * fx_sys.pop_scale(("ball", id(b)), t),
+                          _bcol, z, glow_scale=_glow_k)
+
+            # T4：生成闪光环（新球出生时）
+            spawn_rings = [r for r in spawn_rings if t - r[2] < SPAWN_RING_LIFE]
+            for _rx, _ry, _rt, _rc in spawn_rings:
+                _rk = (t - _rt) / SPAWN_RING_LIFE
+                _rr = (rel(0.012) + rel(0.055) * _rk) * z
+                _rsx, _rsy = zoom_at(z, _rx, _ry)
+                gfx.draw_ring_aa(fb, _rsx, _rsy, _rr, max(0.8, 2.2 * (1.0 - _rk)), _rc,
+                                 0.85 * (1.0 - _rk))
 
             balls.extend(new_balls)
             # T3 视觉反馈：推进生命周期 → 叠加各层效果
