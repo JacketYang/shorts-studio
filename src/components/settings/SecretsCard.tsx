@@ -27,13 +27,6 @@ interface Group {
 
 const GROUPS: Group[] = [
   {
-    id: 'ai',
-    title: 'AI 模型服务',
-    desc: '至少一个即可启用 AI 功能',
-    keys: ['gemini_api_key', 'custom_ai_api_key', 'anthropic_api_key'],
-    ownSave: true,
-  },
-  {
     id: 'yt',
     title: 'YouTube 平台',
     desc: '公开数据查询与频道 OAuth 授权',

@@ -1,14 +1,57 @@
 import React, { useEffect, useState } from 'react';
-import { Bot, RefreshCw, RotateCcw, Wifi } from 'lucide-react';
+import { Bot, CheckCircle2, Loader2, RefreshCw, RotateCcw, Save, Wifi } from 'lucide-react';
 import type { AiProviderConfig, AiProviderType, ThinkingLevel } from '../../domain/types';
+
+export interface SecretItem {
+  key: string;
+  env_name: string;
+  label: string;
+  hint: string;
+  configured: boolean;
+  source: 'db' | 'env' | null;
+  tail: string | null;
+}
 
 interface AiSettingsCardProps {
   aiConfig: AiProviderConfig;
   defaultAiConfig: AiProviderConfig;
+  secrets?: SecretItem[];
   busy: boolean;
   setBusy: (v: boolean) => void;
   onRefresh: () => Promise<void>;
 }
+
+interface ProviderMeta {
+  keyName: string;
+  keyLabel: string;
+  baseUrlPlaceholder: string;
+  modelPlaceholder: string;
+  note: string;
+}
+
+const PROVIDER_META: Record<AiProviderType, ProviderMeta> = {
+  gemini: {
+    keyName: 'gemini_api_key',
+    keyLabel: 'Gemini API Key',
+    baseUrlPlaceholder: '官方端点，无需填写',
+    modelPlaceholder: 'gemini-4-hydrogen',
+    note: 'Gemini 原生协议使用官方端点，Base URL 固定不可改。',
+  },
+  'openai-compatible': {
+    keyName: 'custom_ai_api_key',
+    keyLabel: 'OpenAI 兼容 Key',
+    baseUrlPlaceholder: 'https://api.openai.com/v1 或 DeepSeek / OneAPI 地址',
+    modelPlaceholder: 'gpt-4o-mini / deepseek-chat',
+    note: '适用于 DeepSeek、OpenRouter、OneAPI 等兼容 /chat/completions 的服务。',
+  },
+  anthropic: {
+    keyName: 'anthropic_api_key',
+    keyLabel: 'Anthropic Key',
+    baseUrlPlaceholder: 'https://api.anthropic.com 或中转代理地址',
+    modelPlaceholder: 'claude-3-7-sonnet-20250219',
+    note: '走 /v1/messages 协议，支持官方或兼容中转。',
+  },
+};
 
 const PRESET_MODELS: Record<AiProviderType, string[]> = {
   gemini: ['gemini-4-hydrogen', 'gemini-2.5-pro', 'gemini-2.5-flash'],
@@ -19,6 +62,7 @@ const PRESET_MODELS: Record<AiProviderType, string[]> = {
 export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
   aiConfig,
   defaultAiConfig,
+  secrets = [],
   busy,
   setBusy,
   onRefresh,
@@ -34,6 +78,13 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
   const [aiSaveMsg, setAiSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [aiKeyDraft, setAiKeyDraft] = useState('');
+  const [savingAiKey, setSavingAiKey] = useState(false);
+  const [aiKeyMsg, setAiKeyMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const activeProviderMeta = PROVIDER_META[aiProvider];
+  const activeKeyName = activeProviderMeta.keyName;
+  const activeKeyItem = secrets.find((s) => s.key === activeKeyName);
   useEffect(() => {
     setAiProvider(aiConfig.provider);
     setAiBaseUrl(aiConfig.base_url);
@@ -47,6 +98,32 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
   const modelChoices = Array.from(
     new Set([...(fetchedModels.length > 0 ? fetchedModels : PRESET_MODELS[aiProvider]), aiModel].filter(Boolean))
   );
+
+  const handleSaveAiKey = async () => {
+    const v = aiKeyDraft.trim();
+    if (!v) return;
+    setSavingAiKey(true);
+    setAiKeyMsg(null);
+    try {
+      const res = await fetch('/api/secrets', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secrets: { [activeKeyName]: v } }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAiKeyMsg({ ok: false, text: data.error ?? '保存失败' });
+      } else {
+        setAiKeyDraft('');
+        setAiKeyMsg({ ok: true, text: `${activeProviderMeta.keyLabel} 已保存，立即可用` });
+        await onRefresh();
+      }
+    } catch (err) {
+      setAiKeyMsg({ ok: false, text: err instanceof Error ? err.message : '网络错误' });
+    } finally {
+      setSavingAiKey(false);
+    }
+  };
 
   const handleFetchModels = async () => {
     setFetchingModels(true);
@@ -165,127 +242,184 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
         </button>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-4 text-xs">
-        <div>
-          <label htmlFor="ai-provider-select" className="block font-medium text-slate-700">
-            接口协议
-          </label>
-          <select
-            id="ai-provider-select"
-            value={aiProvider}
-            onChange={(e) => {
-              const next = e.target.value as AiProviderType;
-              setAiProvider(next);
-              setFetchedModels([]);
-              if (next === 'anthropic') {
-                setAiModel('claude-3-7-sonnet-20250219');
-              } else if (next === 'openai-compatible') {
-                setAiModel('gpt-4o-mini');
-              } else {
-                setAiModel('gemini-4-hydrogen');
+      {/* ===== 协议 · 密钥 · 端点 · 模型 · 思考强度（一体化） ===== */}
+      <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3.5 text-xs">
+        {/* 第 1 行：协议 + 密钥 + 保存 */}
+        <div className="flex flex-wrap items-end gap-2.5">
+          <div className="w-[230px] shrink-0">
+            <label htmlFor="ai-provider-select" className="block font-medium text-slate-800">
+              接口协议
+            </label>
+            <select
+              id="ai-provider-select"
+              value={aiProvider}
+              onChange={(e) => {
+                const next = e.target.value as AiProviderType;
+                setAiProvider(next);
+                setFetchedModels([]);
+                setAiBaseUrl('');
+                if (next === 'anthropic') {
+                  setAiModel('claude-3-7-sonnet-20250219');
+                } else if (next === 'openai-compatible') {
+                  setAiModel('gpt-4o-mini');
+                } else {
+                  setAiModel('gemini-4-hydrogen');
+                }
+              }}
+              className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 text-xs"
+            >
+              <option value="gemini">Gemini 原生协议</option>
+              <option value="openai-compatible">OpenAI 兼容 (/chat/completions)</option>
+              <option value="anthropic">Anthropic Claude (/v1/messages)</option>
+            </select>
+          </div>
+
+          <div className="min-w-[240px] flex-1">
+            <div className="flex items-baseline justify-between gap-2">
+              <label htmlFor={`sk-${activeKeyName}`} className="block font-medium text-slate-800">
+                {activeProviderMeta.keyLabel}
+              </label>
+              {activeKeyItem?.configured ? (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700"
+                  title={`${activeKeyItem.source === 'db' ? '已保存到数据库' : '来自 .env'} ··${activeKeyItem.tail}`}
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  已配置 ··{activeKeyItem.tail}
+                </span>
+              ) : (
+                <span className="text-[10px] font-medium text-amber-600">未配置</span>
+              )}
+            </div>
+            <input
+              id={`sk-${activeKeyName}`}
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={aiKeyDraft}
+              onChange={(e) => setAiKeyDraft(e.target.value)}
+              placeholder={
+                activeKeyItem?.configured
+                  ? '已配置，留空不修改'
+                  : `粘贴 ${activeProviderMeta.keyLabel}`
               }
-            }}
-            className="mt-1 w-full rounded border border-slate-200 px-3 py-2"
-          >
-            <option value="gemini">Gemini 原生协议</option>
-            <option value="openai-compatible">OpenAI 兼容协议 (/chat/completions)</option>
-            <option value="anthropic">Anthropic Claude 协议 (/v1/messages)</option>
-          </select>
-        </div>
+              className="mt-1 w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-[11px] text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none"
+            />
+          </div>
 
-        <div className="md:col-span-2">
-          <label htmlFor="ai-base-url" className="block font-medium text-slate-700">
-            Base URL（可选，留空走官方默认端点）
-          </label>
-          <input
-            id="ai-base-url"
-            type="text"
-            value={aiBaseUrl}
-            onChange={(e) => setAiBaseUrl(e.target.value)}
-            placeholder={
-              aiProvider === 'gemini'
-                ? 'https://generativelanguage.googleapis.com'
-                : aiProvider === 'anthropic'
-                  ? 'https://api.anthropic.com 或中转代理地址'
-                  : 'https://api.openai.com/v1 或 DeepSeek / OneAPI 地址'
-            }
-            className="mt-1 w-full rounded border border-slate-200 px-3 py-2 font-mono"
-          />
-        </div>
-
-        <div>
-          <label htmlFor="ai-thinking-level" className="block font-medium text-slate-700">
-            思考强度 (对齐最高档)
-          </label>
-          <select
-            id="ai-thinking-level"
-            value={thinkingLevel}
-            onChange={(e) => setThinkingLevel(e.target.value as ThinkingLevel)}
-            className="mt-1 w-full rounded border border-slate-200 px-3 py-2"
-          >
-            <option value="max">最高档对齐 (xhigh / max / high 自动最高)</option>
-            <option value="high">high</option>
-            <option value="medium">medium</option>
-            <option value="low">low</option>
-            <option value="off">off (关闭思考)</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Dual Mode Model Selector + Manual Input + GET Fetch */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-12 items-end text-xs">
-        <div className="md:col-span-5">
-          <label htmlFor="ai-model-select" className="block font-medium text-slate-700">
-            快速选择模型（支持从当前端口 GET 获取）
-          </label>
-          <select
-            id="ai-model-select"
-            value={modelChoices.includes(aiModel) ? aiModel : ''}
-            onChange={(e) => {
-              if (e.target.value) setAiModel(e.target.value);
-            }}
-            className="mt-1 w-full rounded border border-slate-200 px-3 py-2 font-mono"
-          >
-            {modelChoices.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-            {!modelChoices.includes(aiModel) && <option value="">自定义：{aiModel}</option>}
-          </select>
-        </div>
-
-        <div className="md:col-span-5">
-          <label htmlFor="ai-model-name" className="block font-medium text-slate-700">
-            当前生效模型 ID（可直接手动填写任意模型名）
-          </label>
-          <input
-            id="ai-model-name"
-            type="text"
-            required
-            value={aiModel}
-            onChange={(e) => setAiModel(e.target.value)}
-            placeholder={
-              aiProvider === 'anthropic'
-                ? 'claude-3-7-sonnet-20250219'
-                : aiProvider === 'gemini'
-                  ? 'gemini-4-hydrogen'
-                  : 'gpt-4o-mini / deepseek-chat'
-            }
-            className="mt-1 w-full rounded border border-slate-200 px-3 py-2 font-mono"
-          />
-        </div>
-
-        <div className="md:col-span-2">
           <button
             type="button"
-            disabled={fetchingModels}
-            onClick={handleFetchModels}
-            className="w-full inline-flex items-center justify-center gap-1.5 rounded border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
+            disabled={!aiKeyDraft.trim() || savingAiKey}
+            onClick={handleSaveAiKey}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-35"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${fetchingModels ? 'animate-spin' : ''}`} />
-            {fetchingModels ? '获取中...' : 'GET 获取模型'}
+            {savingAiKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            保存密钥
           </button>
+        </div>
+
+        {aiKeyMsg ? (
+          <div className={`text-[11px] font-medium ${aiKeyMsg.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+            {aiKeyMsg.text}
+          </div>
+        ) : null}
+
+        {/* 第 2 行：Base URL + 模型 + 思考强度 */}
+        <div className="flex flex-wrap items-end gap-2.5">
+          <div className="min-w-[260px] flex-1">
+            <label htmlFor="ai-base-url" className="block font-medium text-slate-800">
+              {aiProvider === 'gemini' ? 'API 端点' : 'Base URL'}
+              {aiProvider !== 'gemini' && (
+                <span className="ml-1 font-normal text-slate-500">留空走官方</span>
+              )}
+            </label>
+            {aiProvider === 'gemini' ? (
+              <div
+                id="ai-base-url"
+                className="mt-1 truncate rounded border border-slate-200 bg-slate-100/70 px-2.5 py-1.5 font-mono text-[11px] text-slate-500"
+                title="Gemini 原生协议固定使用官方端点"
+              >
+                https://generativelanguage.googleapis.com
+              </div>
+            ) : (
+              <input
+                id="ai-base-url"
+                type="text"
+                value={aiBaseUrl}
+                onChange={(e) => setAiBaseUrl(e.target.value)}
+                placeholder={activeProviderMeta.baseUrlPlaceholder}
+                className="mt-1 w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-[11px]"
+              />
+            )}
+          </div>
+
+          <div className="min-w-[180px] flex-1">
+            <label htmlFor="ai-model-select" className="block font-medium text-slate-800">
+              模型
+            </label>
+            <div className="mt-1 flex gap-1">
+              <select
+                id="ai-model-select"
+                value={modelChoices.includes(aiModel) ? aiModel : ''}
+                onChange={(e) => {
+                  if (e.target.value) setAiModel(e.target.value);
+                }}
+                className="w-full min-w-0 rounded border border-slate-300 px-2.5 py-1.5 font-mono text-[11px]"
+              >
+                {modelChoices.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+                {!modelChoices.includes(aiModel) && <option value="">自定义：{aiModel}</option>}
+              </select>
+              <button
+                type="button"
+                disabled={fetchingModels || aiProvider === 'gemini'}
+                onClick={handleFetchModels}
+                title="从当前端点 GET /models 拉取（Gemini 原生协议不支持）"
+                className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1.5 text-[11px] text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${fetchingModels ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          </div>
+
+          <div className="w-[180px] shrink-0">
+            <label htmlFor="ai-thinking-level" className="block font-medium text-slate-800">
+              思考强度
+            </label>
+            <select
+              id="ai-thinking-level"
+              value={thinkingLevel}
+              onChange={(e) => setThinkingLevel(e.target.value as ThinkingLevel)}
+              className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 text-[11px]"
+            >
+              <option value="max">最高档对齐 (自动)</option>
+              <option value="high">high</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+              <option value="off">off</option>
+            </select>
+          </div>
+        </div>
+
+        {/* 第 3 行：模型 ID 手填 + 当前协议提示 */}
+        <div className="flex flex-wrap items-end gap-2.5">
+          <div className="w-full">
+            <label htmlFor="ai-model-name" className="block font-medium text-slate-800">
+              模型 ID（可直接手填任意模型名）
+            </label>
+            <input
+              id="ai-model-name"
+              type="text"
+              required
+              value={aiModel}
+              onChange={(e) => setAiModel(e.target.value)}
+              placeholder={activeProviderMeta.modelPlaceholder}
+              className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono text-[11px]"
+            />
+          </div>
         </div>
       </div>
 
