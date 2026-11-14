@@ -25,6 +25,7 @@ import numpy as np  # noqa: E402
 import arc as arcmod  # noqa: E402
 import fx as fxmod  # noqa: E402
 import gfx  # noqa: E402
+import text_layer as textmod  # noqa: E402
 import theme as thememod  # noqa: E402
 import spec_params  # noqa: E402
 from spec_params import (  # noqa: E402
@@ -231,14 +232,18 @@ class FrameComposer:
         self.w = w
         self.h = h
 
-    def compose(
+    def render(
         self,
         fb: np.ndarray,
         trail_buf: np.ndarray | None,
         shift: tuple = (0.0, 0.0),
         bg: np.ndarray | None = None,
-    ) -> bytes:
-        """合成输出帧。shift 非零时整体平移，空出的边缘用背景色填充。"""
+    ) -> np.ndarray:
+        """合成基础画面（含拖尾与震屏），返回 float32 帧供文字层叠加。
+
+        T6：文字必须在过曝保护之后、转 uint8 之前叠加，
+        所以拆成 render() + finish() 两步。
+        """
         np.copyto(self.out_f, fb)
         if trail_buf is not None:
             self.out_f += trail_buf
@@ -250,8 +255,23 @@ class FrameComposer:
         # 过曝保护：每帧只做一次，保留密集区域的色相而不是糊成死白
         gfx.soften_highlights(self.out_f)
         np.clip(self.out_f, 0.0, 255.0, out=self.out_f)
-        np.copyto(self.out_u8, self.out_f, casting="unsafe")
+        return self.out_f
+
+    def finish(self, frame: np.ndarray) -> bytes:
+        """把已叠加文字的 float32 帧转为 uint8 RGB24 字节流。"""
+        np.clip(frame, 0.0, 255.0, out=frame)
+        np.copyto(self.out_u8, frame, casting="unsafe")
         return self.out_u8.tobytes()
+
+    def compose(
+        self,
+        fb: np.ndarray,
+        trail_buf: np.ndarray | None,
+        shift: tuple = (0.0, 0.0),
+        bg: np.ndarray | None = None,
+    ) -> bytes:
+        """无文字时的便捷路径（保留给未来复用）。"""
+        return self.finish(self.render(fb, trail_buf, shift, bg))
 
     def _shift(self, buf: np.ndarray, dx: int, dy: int, bg: np.ndarray | None) -> None:
         """整体平移 buf，(dx, dy)；空出的边缘用背景色填充。"""
@@ -305,6 +325,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
     accent_rgbs = list(theme.palette)
     if not accent_rgbs:
         accent_rgbs = [(56, 189, 248), (244, 114, 182), (251, 191, 36)]
+
+    # T6：文字层（在最终合成阶段叠加，不写入 trail_buffer）
+    text_layer = textmod.TextLayer(spec, W, H, accent_rgbs, duration)
+    # HUD 统计：各模板在循环里更新
+    hud_stats = {"balls": 0, "notes": 0, "bounces": 0, "bins_filled": 0}
 
     # 背景缓存：整段只生成一次（渐变 + 光斑）
     bg_cache = theme.build_background()
@@ -426,6 +451,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     if trigger:
                         _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.78)
                         note_idx += 1
+                        hud_stats["notes"] = note_idx
                         # T3: 过中线 0.5；本帧所有摆同时过零视为"全体对齐" 1.0
                         fx_sys.spawn(t, sx_pre, sy_pre, 0.5, col, palette=accent_rgbs)
                         # T4：中线对应位置出现短促垂直闪光线
@@ -488,8 +514,10 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 _comp = ghost_buf
             else:
                 _comp = _comp + ghost_buf
-            proc.stdin.write(composer.compose(fb, _comp,
-                                              shift=(_dx, _dy), bg=bg_cache))
+            _out = composer.render(fb, _comp, shift=(_dx, _dy), bg=bg_cache)
+            # T6：文字在最后一步叠加，不进入 trail_buffer
+            text_layer.draw(_out, t, hud_stats)
+            proc.stdin.write(composer.finish(_out))
 
     # =====================================================================
     # orbit-sync
@@ -557,6 +585,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                     if prev_k != curr_k:
                         _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.82)
                         note_idx += 1
+                        hud_stats["notes"] = note_idx
                         # T3: 过光束 0.6
                         fx_sys.spawn(t, ox_pre, oy_pre, 0.6, col, palette=accent_rgbs)
                         # T4：光束在该位置爆一个闪光点
@@ -612,8 +641,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             fx_sys.draw_particles(fb, t)
             gfx.apply_vignette(fb, fx_cfg.vignette)
             _dx, _dy = fx_sys.shake_offset(t)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
-                                              shift=(_dx, _dy), bg=bg_cache))
+            _out = composer.render(fb, trail_buf.buf if trail_on else None,
+                                   shift=(_dx, _dy), bg=bg_cache)
+            # T6：文字在最后一步叠加，不进入 trail_buffer
+            text_layer.draw(_out, t, hud_stats)
+            proc.stdin.write(composer.finish(_out))
 
     # =====================================================================
     # ball-sort
@@ -786,6 +818,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                                 b_obj["vy"] -= 1.65 * dot * ny
                                 _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.65)
                                 note_idx += 1
+                                hud_stats["notes"] = note_idx
                                 # T3: 钉子碰撞 0.4
                                 px_s, py_s = zoom_at(z, px * W, py * H)
                                 fx_sys.spawn(t, px_s, py_s, 0.4,
@@ -806,6 +839,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         b_obj["y"] = settle_y + 0.01 - (stack_idx // 3) * 0.024
                         _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.95)
                         note_idx += 1
+                        hud_stats["notes"] = note_idx
                         # T3: 入桶 0.9；整桶满（该桶第 5 个）额外 1.0
                         bx_s, by_s = zoom_at(z, b_obj["x"] * W, b_obj["y"] * H)
                         _bcol = bin_rgbs[b_obj["cidx"] % len(bin_rgbs)]
@@ -860,8 +894,14 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             fx_sys.draw_particles(fb, t)
             gfx.apply_vignette(fb, fx_cfg.vignette)
             _dx, _dy = fx_sys.shake_offset(t)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
-                                              shift=(_dx, _dy), bg=bg_cache))
+            # T6：HUD 统计
+            hud_stats["balls"] = sum(bin_counts)
+            hud_stats["bins_filled"] = sum(1 for c in bin_counts if c >= BIN_FULL)
+            _out = composer.render(fb, trail_buf.buf if trail_on else None,
+                                   shift=(_dx, _dy), bg=bg_cache)
+            # T6：文字在最后一步叠加，不进入 trail_buffer
+            text_layer.draw(_out, t, hud_stats)
+            proc.stdin.write(composer.finish(_out))
 
     # =====================================================================
     # melody-bounce（默认分支）
@@ -1032,6 +1072,7 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         color_cycler.advance(t)
                         _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.9)
                         note_idx += 1
+                        hud_stats["notes"] = note_idx
 
                         # T3: 碰墙 0.6，分裂 1.0，每第 8 次碰撞额外 +0.2
                         _fx_i = 0.6
@@ -1085,6 +1126,9 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                                  0.85 * (1.0 - _rk))
 
             balls.extend(new_balls)
+            # T6：HUD 统计
+            hud_stats["balls"] = len(balls)
+            hud_stats["bounces"] = bounce_count
             # T5：arc 特殊事件
             # countdown：每段开头 0.15 秒内的节拍点 → 全屏闪光 + tick 音频事件
             for _bp in arcmod.beat_points(spec):
@@ -1111,8 +1155,11 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             fx_sys.draw_particles(fb, t)
             gfx.apply_vignette(fb, fx_cfg.vignette)
             _dx, _dy = fx_sys.shake_offset(t)
-            proc.stdin.write(composer.compose(fb, trail_buf.buf if trail_on else None,
-                                              shift=(_dx, _dy), bg=bg_cache))
+            _out = composer.render(fb, trail_buf.buf if trail_on else None,
+                                   shift=(_dx, _dy), bg=bg_cache)
+            # T6：文字在最后一步叠加，不进入 trail_buffer
+            text_layer.draw(_out, t, hud_stats)
+            proc.stdin.write(composer.finish(_out))
 
     return events
 
@@ -1128,25 +1175,13 @@ def render_mp4(payload_path: str, output_mp4: str):
     width = int(spec["format"]["width"])
     height = int(spec["format"]["height"])
 
-    hook_text = spec["concept"]["hook_line"].replace("'", "").replace(":", " ").replace("%", "")
-    title_text = spec["publish"]["title"][:44].replace("'", "").replace(":", " ").replace("%", "")
-
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_mp4 = os.path.join(tmpdir, "video_only.mp4")
         wav_path = os.path.join(tmpdir, "audio.wav")
 
-        # T2：内部渲染 720x1280（--draft 为 540x960），ffmpeg 用 lanczos 放大
-        # 文字字号/位置按输出尺寸计算，与历史版本保持一致
-        hook_fs = int(round(52 * height / 1920))
-        title_fs = int(round(28 * height / 1920))
-        hook_y = int(round(220 * height / 1920))
-        title_y = int(round(1660 * height / 1920))
-
-        vf = (
-            f"scale={width}:{height}:flags=lanczos,"
-            f"drawtext=text='{hook_text}':fontcolor=white:fontsize={hook_fs}:x=(w-text_w)/2:y={hook_y},"
-            f"drawtext=text='{title_text}':fontcolor=#94A3B8:fontsize={title_fs}:x=(w-text_w)/2:y={title_y}"
-        )
+        # T6：文字改由 text_layer 在帧缓冲上叠加，ffmpeg 只做 lanczos 放大。
+        # 不再把 publish.title 画进视频（原 y=1660 的标题已移除）。
+        vf = f"scale={width}:{height}:flags=lanczos"
 
         v_cmd = [
             "ffmpeg",

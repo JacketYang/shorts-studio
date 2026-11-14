@@ -136,6 +136,16 @@ export const VideoSpecSchema = z.object({
         })
         .optional(),
     }),
+    // T6 实时 HUD 计数器
+    hud: z
+      .object({
+        counter: z.enum(['none', 'balls', 'notes', 'bounces', 'bins_filled']).optional(),
+        label: z.string().max(24).optional(),
+        position: z.enum(['top-safe', 'bottom-safe']).optional(),
+      })
+      .optional(),
+    // T6 自动叠加字幕（30% / 60% / 85% 三个时间点）
+    captions_auto: z.boolean().optional(),
     // T5 强度曲线：让成片有铺垫、升级、高潮、收尾。可选，缺省按 ramp 处理。
     arc: z
       .object({
@@ -654,6 +664,24 @@ export const VIDEO_SPEC_JSON_SCHEMA = {
       type: 'object',
       required: ['template', 'template_version', 'seed', 'style', 'params'],
       properties: {
+        hud: {
+          type: 'object',
+          description: '实时数字计数器，如 BALLS 17',
+          properties: {
+            counter: {
+              type: 'string',
+              enum: ['none', 'balls', 'notes', 'bounces', 'bins_filled'],
+              default: 'none',
+            },
+            label: { type: 'string', maxLength: 24 },
+            position: { type: 'string', enum: ['top-safe', 'bottom-safe'], default: 'bottom-safe' },
+          },
+        },
+        captions_auto: {
+          type: 'boolean',
+          default: false,
+          description: '在 30%/60%/85% 时间点自动叠加内置字幕',
+        },
         arc: {
           type: 'object',
           description: '强度曲线：给成片提供铺垫/升级/高潮/收尾',

@@ -91,6 +91,14 @@ export interface VideoSpec {
         vignette?: number;
       };
     };
+    /** T6 实时 HUD 计数器 */
+    hud?: {
+      counter?: 'none' | 'balls' | 'notes' | 'bounces' | 'bins_filled';
+      label?: string;
+      position?: 'top-safe' | 'bottom-safe';
+    };
+    /** T6 自动叠加字幕 */
+    captions_auto?: boolean;
     /** T5 强度曲线；缺省按 ramp 处理 */
     arc?: {
       preset?: 'ramp' | 'tease-then-build' | 'wave' | 'countdown' | 'drop';
