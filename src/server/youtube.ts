@@ -24,7 +24,10 @@ export function isYoutubeApiKeyConfigured(): boolean {
 export function getAppBaseUrl(): string {
   const rawBase =
     process.env.APP_URL ||
-    'https://ais-dev-suiarb4hfe3gb5pgv4wcv5-106022029809.us-west2.run.app';
+    // 未配置 APP_URL 时，尝试从运行环境推断当前访问地址，避免静默回退到错误的域名
+    (process.env.INSTABOX_PORT_URL ||
+      (process.env.HOSTNAME ? `https://3000-${process.env.HOSTNAME.replace(/^instabox-/, '')}.instabox.tech` : '') ) ||
+    'http://localhost:3000';
   const trimmed = rawBase.replace(/\/+$/, '');
   return trimmed.startsWith('http://') && !trimmed.includes('localhost')
     ? trimmed.replace(/^http:\/\//, 'https://')

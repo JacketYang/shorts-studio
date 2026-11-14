@@ -1,5 +1,19 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronUp, Eye, EyeOff, KeyRound, Loader2, Save, Trash2 } from 'lucide-react';
+import {
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  KeyRound,
+  Link2,
+  Loader2,
+  Save,
+  Trash2,
+} from 'lucide-react';
 
 export interface SecretItem {
   key: string;
@@ -13,6 +27,8 @@ export interface SecretItem {
 
 interface SecretsCardProps {
   secrets: SecretItem[];
+  /** YouTube OAuth 回调地址（= APP_URL + /api/auth/youtube/callback） */
+  redirectUri?: string;
   onRefresh: () => Promise<void>;
 }
 
@@ -42,13 +58,32 @@ const GROUPS: Group[] = [
   },
 ];
 
-export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, onRefresh }) => {
+export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, redirectUri, onRefresh }) => {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [clearingKey, setClearingKey] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyRedirect = async () => {
+    if (!redirectUri) return;
+    try {
+      await navigator.clipboard.writeText(redirectUri);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // 剪贴板不可用时回退到选中文本
+      const el = document.getElementById('yt-redirect-uri');
+      if (el) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        window.getSelection()?.removeAllRanges();
+        window.getSelection()?.addRange(range);
+      }
+    }
+  };
 
   const byKey = useMemo(() => {
     const m = new Map<string, SecretItem>();
@@ -303,6 +338,43 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, onRefresh }) 
                       </div>
                     );
                   })}
+
+                  {/* YouTube 专属：OAuth 回调地址 + 直达 Google Cloud 控制台 */}
+                  {group.id === 'yt' && redirectUri ? (
+                    <div className="lg:col-span-2 mt-1 rounded border border-sky-200 bg-sky-50/60 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-900">
+                          <Link2 className="h-3 w-3" />
+                          OAuth 回调地址（粘贴到 Google Cloud 的「已获授权的重定向 URI」）
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <a
+                            href="https://console.cloud.google.com/apis/credentials"
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="inline-flex items-center gap-1 rounded border border-sky-300 bg-white px-2 py-0.5 text-[10px] font-medium text-sky-800 hover:bg-sky-100"
+                          >
+                            <ExternalLink className="h-2.5 w-2.5" />
+                            打开 Google Cloud 凭据页
+                          </a>
+                          <button
+                            type="button"
+                            onClick={handleCopyRedirect}
+                            className="inline-flex items-center gap-1 rounded border border-sky-300 bg-white px-2 py-0.5 text-[10px] font-medium text-sky-800 hover:bg-sky-100"
+                          >
+                            {copied ? <Check className="h-2.5 w-2.5" /> : <Copy className="h-2.5 w-2.5" />}
+                            {copied ? '已复制' : '复制'}
+                          </button>
+                        </div>
+                      </div>
+                      <div
+                        id="yt-redirect-uri"
+                        className="mt-1 select-all break-all rounded bg-white px-2 py-1.5 font-mono text-[11px] text-slate-800 ring-1 ring-inset ring-sky-200"
+                      >
+                        {redirectUri}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );

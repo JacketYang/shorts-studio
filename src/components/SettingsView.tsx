@@ -282,7 +282,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, on
       {activeSection === 'ai' && (
         <div className="space-y-6">
                 {/* 平台凭据管理（全部可在后台填写保存） */}
-                <SecretsCard secrets={state.secrets ?? []} onRefresh={onRefresh} />
+                <SecretsCard
+        secrets={state.secrets ?? []}
+        redirectUri={state.oauth_config.redirect_uri}
+        onRefresh={onRefresh}
+      />
 
 
                 <AiSettingsCard
