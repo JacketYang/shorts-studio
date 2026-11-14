@@ -1,0 +1,6 @@
+{
+  "name": "Shorts Studio",
+  "description": "多频道 YouTube Shorts 自动化工作台：创意 Spec 导入、确定性物理音频渲染、差异度守卫、审核与定时发布。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

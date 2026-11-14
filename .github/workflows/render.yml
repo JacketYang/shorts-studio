@@ -1,0 +1,36 @@
+name: Shorts Studio Render Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_ids:
+        description: "Comma-separated render job IDs to process"
+        required: true
+      control_plane_url:
+        description: "Control plane base URL"
+        required: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python & ffmpeg
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Claim & Render Batch
+        env:
+          WORKER_TOKEN: ${{ secrets.WORKER_TOKEN }}
+          WORKER_HMAC_SECRET: ${{ secrets.WORKER_HMAC_SECRET }}
+        run: |
+          echo "Claiming jobs: ${{ inputs.job_ids }}"
+          python3 --version
+          ffmpeg -version | head -n 1
