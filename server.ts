@@ -233,24 +233,51 @@ async function startServer() {
     }
   });
 
+
+  // OAuth 回调收尾页：无论成功失败都 postMessage 回 opener，前端统一处理
+  const sendOauthResultPage = (
+    res: express.Response,
+    payload: Record<string, unknown>,
+    message: string,
+    status = 200
+  ) => {
+    const safe = JSON.stringify(payload).replace(/</g, '\\u003c');
+    res.status(status).send(`<!doctype html><html><head><meta charset="utf-8"><title>Shorts Studio</title>
+      <style>body{font-family:system-ui,-apple-system,sans-serif;padding:32px;color:#0f172a}
+      .box{max-width:440px;margin:40px auto;text-align:center}
+      .i{font-size:40px;line-height:1}</style></head>
+      <body><div class="box"><div class="i">${payload.type === 'YT_OAUTH_SUCCESS' ? '✅' : '⚠️'}</div>
+      <p>${message}</p></div>
+      <script>
+        try {
+          if (window.opener) {
+            window.opener.postMessage(${safe}, '*');
+            setTimeout(function(){ window.close(); }, 400);
+          } else {
+            window.location.href = '/';
+          }
+        } catch (e) {}
+      </script></body></html>`);
+  };
+
   const handleYoutubeOAuthCallback = async (req: express.Request, res: express.Response) => {
     try {
       const { code, state, error } = req.query;
       if (error) {
-        return res.status(400).send(`<p>授权被取消或拒绝: ${String(error)}</p>`);
+        return sendOauthResultPage(res, { type: 'YT_OAUTH_ERROR', error: String(error) }, '授权被取消或拒绝。', 400);
       }
       if (typeof code !== 'string' || typeof state !== 'string') {
-        return res.status(400).send('<p>缺少 code 或 state 参数</p>');
+        return sendOauthResultPage(res, { type: 'YT_OAUTH_ERROR', error: 'missing_code_or_state' }, '缺少 code 或 state 参数。', 400);
       }
       const parsedState = verifyOAuthState<{ channelId: string; ts: number }>(state);
       if (!parsedState?.channelId) {
-        return res.status(400).send('<p>OAuth state 校验失败，请返回工作台重试。</p>');
+        return sendOauthResultPage(res, { type: 'YT_OAUTH_ERROR', error: 'invalid_state' }, 'OAuth state 校验失败，请返回工作台重试。', 400);
       }
 
       const db = loadDb();
       const channel = db.channels.find((c) => c.id === parsedState.channelId);
       if (!channel) {
-        return res.status(404).send('<p>目标频道不存在</p>');
+        return sendOauthResultPage(res, { type: 'YT_OAUTH_ERROR', error: 'channel_not_found' }, '目标频道不存在。', 404);
       }
 
       const tokens = await exchangeCodeForYoutubeTokens(code);
@@ -290,26 +317,23 @@ async function startServer() {
       });
       saveDb(db);
 
-      const safePayload = JSON.stringify({
-        type: 'YT_OAUTH_SUCCESS',
-        channelId: channel.id,
-        ytChannelId: ytInfo.yt_channel_id,
-        title: ytInfo.title,
-      });
-
-      res.send(`<!doctype html><html><body style="font-family:sans-serif;padding:24px;">
-        <script>
-          if (window.opener) {
-            window.opener.postMessage(${safePayload}, '*');
-            window.close();
-          } else {
-            window.location.href = '/';
-          }
-        </script>
-        <p>YouTube 频道授权成功，正在返回工作台…</p>
-      </body></html>`);
+      sendOauthResultPage(
+        res,
+        {
+          type: 'YT_OAUTH_SUCCESS',
+          channelId: channel.id,
+          ytChannelId: ytInfo.yt_channel_id,
+          title: ytInfo.title,
+        },
+        'YouTube 频道授权成功，正在返回工作台…'
+      );
     } catch (err: unknown) {
-      res.status(500).send(`<p>YouTube OAuth 回调失败: ${err instanceof Error ? err.message : '未知错误'}</p>`);
+      sendOauthResultPage(
+        res,
+        { type: 'YT_OAUTH_ERROR', error: err instanceof Error ? err.message : '未知错误' },
+        'YouTube OAuth 回调失败，请返回工作台重试。',
+        500
+      );
     }
   };
 

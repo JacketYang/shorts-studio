@@ -339,42 +339,54 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, redirectUri, 
                     );
                   })}
 
-                  {/* YouTube 专属：OAuth 回调地址 + 直达 Google Cloud 控制台 */}
+                  {/* HTML 第 4 格：OAuth 回调地址（与前三项同规格，凑成 2×2） */}
                   {group.id === 'yt' && redirectUri ? (
-                    <div className="lg:col-span-2 mt-1 rounded border border-sky-200 bg-sky-50/60 px-3 py-2.5">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-900">
-                          <Link2 className="h-3 w-3" />
-                          OAuth 回调地址（粘贴到 Google Cloud 的「已获授权的重定向 URI」）
-                        </div>
-                        <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-2 lg:col-span-2">
+                      <span
+                        className="w-1.5 shrink-0"
+                        title="回调地址由 APP_URL 自动生成，无需手填"
+                      >
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-sky-400" />
+                      </span>
+                      <label
+                        htmlFor="yt-redirect-uri"
+                        title="粘贴到 Google Cloud → 凭据 → OAuth 客户端 → 已获授权的重定向 URI"
+                        className="w-[152px] shrink-0 truncate text-xs font-medium text-slate-800"
+                      >
+                        OAuth 回调地址
+                      </label>
+                      <div className="relative min-w-0 flex-1">
+                        <input
+                          id="yt-redirect-uri"
+                          type="text"
+                          readOnly
+                          value={redirectUri}
+                          onFocus={(e) => e.currentTarget.select()}
+                          className="w-full cursor-text select-all rounded border border-slate-300 bg-slate-50 py-1 pl-2 pr-[46px] font-mono text-[11px] text-slate-700 focus:border-slate-500 focus:outline-none"
+                        />
+                        <div className="absolute inset-y-0 right-0 flex items-center gap-0.5 pr-0.5">
                           <a
                             href="https://console.cloud.google.com/apis/credentials"
                             target="_blank"
                             rel="noreferrer noopener"
-                            className="inline-flex items-center gap-1 rounded border border-sky-300 bg-white px-2 py-0.5 text-[10px] font-medium text-sky-800 hover:bg-sky-100"
+                            title="打开 Google Cloud 凭据页"
+                            className="rounded p-1 text-slate-400 hover:bg-sky-50 hover:text-sky-700"
                           >
-                            <ExternalLink className="h-2.5 w-2.5" />
-                            打开 Google Cloud 凭据页
+                            <ExternalLink className="h-3 w-3" />
                           </a>
                           <button
                             type="button"
                             onClick={handleCopyRedirect}
-                            className="inline-flex items-center gap-1 rounded border border-sky-300 bg-white px-2 py-0.5 text-[10px] font-medium text-sky-800 hover:bg-sky-100"
+                            title="复制回调地址"
+                            className="rounded p-1 text-slate-400 hover:bg-sky-50 hover:text-sky-700"
                           >
-                            {copied ? <Check className="h-2.5 w-2.5" /> : <Copy className="h-2.5 w-2.5" />}
-                            {copied ? '已复制' : '复制'}
+                            {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
                           </button>
                         </div>
                       </div>
-                      <div
-                        id="yt-redirect-uri"
-                        className="mt-1 select-all break-all rounded bg-white px-2 py-1.5 font-mono text-[11px] text-slate-800 ring-1 ring-inset ring-sky-200"
-                      >
-                        {redirectUri}
-                      </div>
                     </div>
                   ) : null}
+
                 </div>
               </div>
             );

@@ -16,6 +16,7 @@ interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, onSwitchChannel }) => {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [oauthMsg, setOauthMsg] = useState<string | null>(null);
+  const [oauthSuccess, setOauthSuccess] = useState<{ title: string; ytChannelId: string } | null>(null);
   const [copiedUri, setCopiedUri] = useState<string | null>(null);
   const [policyModal, setPolicyModal] = useState<'privacy' | 'terms' | null>(null);
   const [busy, setBusy] = useState(false);
@@ -51,10 +52,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, on
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) return;
+      // 同源即可：本工作台可能部署在 *.instabox.tech / *.run.app / 自定义域名 / localhost
+      const sameOrigin = event.origin === window.location.origin;
+      const isLocal = event.origin.includes('localhost') || event.origin.includes('127.0.0.1');
+      if (!sameOrigin && !isLocal) return;
       if (event.data?.type === 'YT_OAUTH_SUCCESS') {
-        setOauthMsg(`YouTube 频道「${event.data.title}」(${event.data.ytChannelId}) 已成功授权并保存凭据！`);
+        setOauthSuccess({ title: String(event.data.title ?? ''), ytChannelId: String(event.data.ytChannelId ?? '') });
+        setOauthMsg(`YouTube 频道「${event.data.title}」已成功授权并保存凭据！`);
+        void onRefresh();
+      } else if (event.data?.type === 'YT_OAUTH_ERROR') {
+        setOauthMsg(`授权失败：${event.data.error ?? '未知错误'}`);
         void onRefresh();
       }
     };
@@ -129,6 +136,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, on
 
   return (
     <div className="space-y-6">
+      {/* 授权成功弹窗 */}
+      {oauthSuccess && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setOauthSuccess(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3.5">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-100">
+                <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base font-bold text-slate-900">授权成功</h3>
+                <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                  YouTube 频道已成功绑定，Refresh Token 已加密保存。
+                </p>
+                <div className="mt-3 space-y-1.5 rounded-lg bg-slate-50 p-3 text-xs">
+                  <div className="flex justify-between gap-3">
+                    <span className="shrink-0 text-slate-500">频道名称</span>
+                    <span className="truncate font-medium text-slate-900">{oauthSuccess.title || '—'}</span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span className="shrink-0 text-slate-500">Channel ID</span>
+                    <span className="truncate font-mono text-[11px] text-slate-900">{oauthSuccess.ytChannelId || '—'}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setOauthSuccess(null)}
+                className="rounded-md bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800"
+              >
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 设置页内分栏导航 */}
       <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
         {([
