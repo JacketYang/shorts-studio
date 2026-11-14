@@ -341,7 +341,7 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, redirectUri, 
 
                   {/* HTML 第 4 格：OAuth 回调地址（与前三项同规格，凑成 2×2） */}
                   {group.id === 'yt' && redirectUri ? (
-                    <div className="flex items-center gap-2 lg:col-span-2">
+                    <div className="flex items-center gap-2">
                       <span
                         className="w-1.5 shrink-0"
                         title="回调地址由 APP_URL 自动生成，无需手填"
@@ -362,7 +362,7 @@ export const SecretsCard: React.FC<SecretsCardProps> = ({ secrets, redirectUri, 
                           readOnly
                           value={redirectUri}
                           onFocus={(e) => e.currentTarget.select()}
-                          className="w-full cursor-text select-all rounded border border-slate-300 bg-slate-50 py-1 pl-2 pr-[46px] font-mono text-[11px] text-slate-700 focus:border-slate-500 focus:outline-none"
+                          className="w-full cursor-text truncate select-all rounded border border-slate-300 bg-slate-50 py-1 pl-2 pr-[46px] font-mono text-[11px] text-slate-700 focus:border-slate-500 focus:outline-none"
                         />
                         <div className="absolute inset-y-0 right-0 flex items-center gap-0.5 pr-0.5">
                           <a
