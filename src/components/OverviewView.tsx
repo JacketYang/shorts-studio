@@ -1,4 +1,12 @@
 import React from 'react';
+import {
+  auditActionLabel,
+  auditPayloadSummary,
+  auditToneDotClass,
+  formatAuditRelative,
+  formatAuditTime,
+  localTimeZoneLabel,
+} from '../lib/audit-format';
 import { AlertTriangle, ArrowRight, CheckCircle2, Clock } from 'lucide-react';
 import type { StudioState } from '../types/ui';
 
@@ -197,25 +205,41 @@ export const OverviewView: React.FC<OverviewViewProps> = ({ state, onNavigate })
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
-                  <th className="pb-2 pr-4">时间 (UTC)</th>
+                  <th className="pb-2 pr-4">
+                    时间
+                    <span className="ml-1 font-normal text-slate-400">({localTimeZoneLabel()})</span>
+                  </th>
                   <th className="pb-2 pr-4">动作</th>
                   <th className="pb-2 pr-4">对象</th>
                   <th className="pb-2">详情</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs">
-                {state.audit_log.slice(0, 7).map((entry) => (
-                  <tr key={entry.id} className="h-10 hover:bg-slate-50">
-                    <td className="py-2 pr-4 font-mono text-slate-500 tabular-nums whitespace-nowrap">
-                      {entry.at.slice(0, 19).replace('T', ' ')}
-                    </td>
-                    <td className="py-2 pr-4 font-medium text-slate-900 whitespace-nowrap">{entry.action}</td>
-                    <td className="py-2 pr-4 font-mono text-slate-600 whitespace-nowrap">{entry.entity}</td>
-                    <td className="py-2 font-mono text-slate-500 truncate max-w-[260px]">
-                      {JSON.stringify(entry.payload)}
-                    </td>
-                  </tr>
-                ))}
+                {state.audit_log.slice(0, 7).map((entry) => {
+                  const rel = formatAuditRelative(entry.at);
+                  return (
+                    <tr key={entry.id} className="h-10 hover:bg-slate-50">
+                      <td className="py-2 pr-4 tabular-nums whitespace-nowrap">
+                        <div className="text-slate-700">{formatAuditTime(entry.at)}</div>
+                        {rel && <div className="text-[11px] text-slate-400">{rel}</div>}
+                      </td>
+                      <td className="py-2 pr-4 whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1.5 font-medium text-slate-900">
+                          <span
+                            className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${auditToneDotClass(entry.action)}`}
+                          />
+                          {auditActionLabel(entry.action)}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-4 font-mono text-slate-600 whitespace-nowrap">{entry.entity}</td>
+                      <td className="py-2 text-slate-600">
+                        <div className="max-w-[320px] truncate" title={auditPayloadSummary(entry.payload)}>
+                          {auditPayloadSummary(entry.payload) || '—'}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
