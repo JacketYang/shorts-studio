@@ -170,6 +170,9 @@ class StyleParams:
 class AudioParams:
     transpose: int = 0
     tempo_bpm: float = 96.0
+    wrap: str = "loop"          # T8：loop / clamp
+    instrument: str = "marimba"
+    mode: str = "sim-driven"
 
 
 @dataclass
@@ -351,6 +354,9 @@ def load_params(spec: dict) -> SpecParams:
     p.audio = AudioParams(
         transpose=clamp_int(music.get("transpose", au_def.get("transpose", 0)), -24, 24),
         tempo_bpm=clamp(music.get("tempo_bpm", au_def.get("tempo_bpm", 96.0)), 40.0, 240.0),
+        wrap=str(music.get("wrap", au_def.get("wrap", "loop")) or "loop"),
+        instrument=str(music.get("instrument", au_def.get("instrument", "marimba")) or "marimba"),
+        mode=str(audio_raw.get("mode", au_def.get("mode", "sim-driven")) or "sim-driven"),
     )
 
     # ---------------- note_trigger ----------------

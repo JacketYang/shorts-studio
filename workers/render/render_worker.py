@@ -26,6 +26,7 @@ import arc as arcmod  # noqa: E402
 import audio as audiomod  # noqa: E402
 import fx as fxmod  # noqa: E402
 import gfx  # noqa: E402
+import rhythm as rhythmmod  # noqa: E402
 import text_layer as textmod  # noqa: E402
 import theme as thememod  # noqa: E402
 import spec_params  # noqa: E402
@@ -293,7 +294,7 @@ class FrameComposer:
 
 
 def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float,
-                x: float = None) -> bool:
+                x: float = None, dur: float = None, vel: float = None) -> bool:
     """T5：drop preset 的蓄力静默窗内抑制所有音频事件。
 
     返回 True 表示已写入。物理与事件时刻不受影响，只是"不发声"。
@@ -304,6 +305,10 @@ def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float,
     ev = {"t": t, "midi": midi, "intensity": intensity}
     if x is not None:
         ev["x"] = x
+    if dur is not None:
+        ev["dur"] = float(dur)
+    if vel is not None:
+        ev["vel"] = float(vel)
     events.append(ev)
     return True
 
@@ -340,13 +345,21 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
     # 背景缓存：整段只生成一次（渐变 + 光斑）
     bg_cache = theme.build_background()
 
-    # 旋律音高 + transpose（半音）
-    notes = []
+    # 旋律：T8 起保留 beat/pitch/dur/vel 完整信息，供节奏锁定使用
+    melody_notes = []
     if melody and melody.get("tracks"):
-        notes = [int(n["pitch"]) + P.audio.transpose for n in melody["tracks"][0]["notes"]]
-    if not notes:
-        notes = [60, 62, 64, 67, 69, 72]
-        notes = [n + P.audio.transpose for n in notes]
+        melody_notes = list(melody["tracks"][0].get("notes") or [])
+    if not melody_notes:
+        melody_notes = [{"beat": float(i), "pitch": p, "dur": 1.0, "vel": 88}
+                        for i, p in enumerate([60, 62, 64, 67, 69, 72])]
+    notes = [int(n["pitch"]) + P.audio.transpose for n in melody_notes]  
+
+    # T8：节奏对齐用的音符时间表
+    _mel_tempo = float((melody or {}).get("tempo_bpm")
+                       or P.audio.tempo_bpm or 96)
+    _wrap = str(P.audio.wrap or "loop")
+    rhythm_schedule = rhythmmod.Schedule(melody_notes, _mel_tempo,
+                                        P.audio.transpose, _wrap, duration)
 
     trail_cfg = P.style.trail
     trail_fade = trail_cfg.fade if trail_cfg.fade > 0 else DEFAULT_TRAIL_FADE
@@ -950,6 +963,42 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
         bounce_count = 0
         flash_timer = 0.0
+
+        # T8：节奏锁定。只在 |gravity| ≤ 0.05 时启用，否则回落旧逻辑。
+        _rhythm_on = rhythmmod.gravity_allows_rhythm(bl.gravity)
+        if _rhythm_on:
+            rhythm_lock = rhythmmod.RhythmLock(
+                rhythm_schedule, speed_px, sides, cx, cy, arena_r,
+                lambda tt: math.radians(ar.rotation_deg_per_s * tt),
+                duration,
+            )
+        else:
+            rhythm_lock = None
+            print(f"  ⚠️ gravity={bl.gravity} 非零，节奏锁定关闭，回落旧逻辑",
+                  file=sys.stderr)
+
+        # T8：t=0 处的音符直接发声（球还没撞墙，但这个音必须先响，
+        # 否则整条旋律会错位一个音，听众就认不出原曲了）
+        if rhythm_lock is not None:
+            _n0 = rhythm_lock.peek_next()
+            if _n0 is not None and abs(_n0["t"]) <= 1e-6:
+                _emit_event(events, spec, 0.0, _n0["pitch"], 0.9,
+                            x=cx, dur=_n0["dur"], vel=_n0["vel"])
+                rhythm_lock.next_index += 1
+                rhythm_lock.emitted += 1
+                rhythm_lock.deviations.append(0.0)
+                note_idx += 1
+                hud_stats["notes"] = note_idx
+
+        # T8：开局对准 —— 让第一次撞墙落在下一个音符上
+        if rhythm_lock is not None and balls:
+            _b0 = balls[0]
+            _pv = rhythm_lock.prime_initial_velocity(
+                0.0, _b0["x"], _b0["y"], _b0["vx"], _b0["vy"],
+                arena_r - _b0["r"] - rel(0.007), 1.0,
+            )
+            if _pv is not None:
+                _b0["vx"], _b0["vy"] = _pv
         gravity_sign = 1.0
 
         for f_idx in range(total_frames):
@@ -1076,9 +1125,43 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                         flash_timer = 0.12
                         # T4：碰撞切换颜色（0.08s 渐变过渡）
                         color_cycler.advance(t)
-                        _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.9)
-                        note_idx += 1
-                        hud_stats["notes"] = note_idx
+
+                        # ---- T8 节奏对齐 ----
+                        _is_main = (b is balls[0]) if balls else False
+                        if rhythm_lock is not None and _is_main:
+                            _spd, _note, _dev = rhythm_lock.solve_speed(
+                                t, b["x"], b["y"], b["vx"], b["vy"],
+                                cur_r - b["r"] - rel(0.007), _spd_m,
+                            )
+                            # _note is None 表示中途碰撞（锁定中），只反射不发声
+                            # 先把速度设成求解值（方向不变）
+                            if _spd is not None:
+                                _vn = math.hypot(b["vx"], b["vy"])
+                                if _vn > 1e-9:
+                                    b["vx"] = b["vx"] / _vn * _spd
+                                    b["vy"] = b["vy"] / _vn * _spd
+
+                            # solve_speed 内部已完成消费（推进索引 + 记录偏差）
+                            if _note is not None and _spd is not None:
+                                _emit_event(events, spec, t, _note["pitch"], 0.9,
+                                            x=b["x"], dur=_note["dur"],
+                                            vel=_note["vel"])
+                                note_idx += 1
+                                hud_stats["notes"] = note_idx
+                        elif rhythm_lock is not None:
+                            # 非主球：只发装饰音（当前音高八度），不推进旋律，
+                            # 也不参与速度求解（否则会与主球的求解互相干扰）。
+                            _cur = rhythm_lock.peek_next()
+                            _dp = rhythmmod.decor_pitch(_cur)
+                            if _dp is not None:
+                                _emit_event(events, spec, t, _dp,
+                                            rhythmmod.DECOR_INTENSITY,
+                                            x=b["x"], dur=0.15, vel=70)
+                        else:
+                            # 回落旧逻辑
+                            _emit_event(events, spec, t, notes[note_idx % len(notes)], 0.9)
+                            note_idx += 1
+                            hud_stats["notes"] = note_idx
 
                         # T3: 碰墙 0.6，分裂 1.0，每第 8 次碰撞额外 +0.2
                         _fx_i = 0.6
@@ -1166,6 +1249,13 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             # T6：文字在最后一步叠加，不进入 trail_buffer
             text_layer.draw(_out, t, hud_stats)
             proc.stdin.write(composer.finish(_out))
+
+    # T8：节奏对齐统计（仅 melody-bounce 且启用锁定时有意义）
+    try:
+        if rhythm_lock is not None:
+            print(f"  🎵 节奏对齐 {rhythm_lock.format_stats()}", file=sys.stderr)
+    except NameError:
+        pass
 
     return events
 

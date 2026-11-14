@@ -264,16 +264,32 @@ def _add_note(bus: np.ndarray, start_sec: float, wave_data: np.ndarray,
     bus[start:start + m, 1] += seg * gr
 
 
-def _render_note(bus, t_sec, midi, intensity, instrument, pan):
+def _render_note(bus, t_sec, midi, intensity, instrument, pan, dur=None, vel=None):
     builder, length = INSTRUMENTS.get(instrument, INSTRUMENTS[DEFAULT_INSTRUMENT])
     freq = float(midi_to_freq(midi))
-    n = int(length * SR)
+
+    # T8：dur 控制音符长度，上限为乐器自身总长
+    note_len = length
+    if dur is not None:
+        try:
+            note_len = min(length, max(0.05, float(dur)))
+        except (TypeError, ValueError):
+            note_len = length
+    n = int(note_len * SR)
     if n <= 0:
         return
+
     rng = np.random.default_rng(abs(hash((instrument, round(t_sec, 3), int(midi)))) % (2 ** 32))
     wav = builder(freq, n, rng)
+
     # intensity 线性映射到 0.35–1.0
     amp = 0.35 + (1.0 - 0.35) * max(0.0, min(1.0, float(intensity)))
+    # vel（0–127）作为额外力度微调（±15%）
+    if vel is not None:
+        try:
+            amp *= 0.85 + 0.30 * max(0.0, min(1.0, float(vel) / 127.0))
+        except (TypeError, ValueError):
+            pass
     _add_note(bus, t_sec, wav, amp * 0.22, pan)
 
 
@@ -530,7 +546,7 @@ def render_audio(wav_path: str, spec: dict, events: list, duration: float,
         x = float(ev.get("x", W_hint * 0.5))
         pan = (x / W_hint - 0.5) * 1.2
         _render_note(bus, ev["t"], int(midi), float(ev.get("intensity", 0.85)),
-                     instrument, pan)
+                     instrument, pan, dur=ev.get("dur"), vel=ev.get("vel"))
         stats["events"] += 1
 
     # ---- 层 2/3/4 ----
