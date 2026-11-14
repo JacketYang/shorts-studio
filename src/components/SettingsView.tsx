@@ -286,6 +286,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ state, onRefresh, on
       <AiSettingsCard
         aiConfig={state.ai_config}
         defaultAiConfig={state.default_ai_config}
+        secrets={state.secrets}
         busy={busy}
         setBusy={setBusy}
         onRefresh={onRefresh}

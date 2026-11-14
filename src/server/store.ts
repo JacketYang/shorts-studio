@@ -52,6 +52,14 @@ import {
   normalizeStorageConfig,
 } from './storage.ts';
 import { getAppBaseUrl, getYoutubeRedirectUri, isYoutubeApiKeyConfigured, isYoutubeOAuthConfigured } from './youtube.ts';
+import {
+  bindSecretsSource,
+  describeSecret,
+  isSecretConfigured,
+  SECRET_ENV_MAP,
+  SECRET_LABELS,
+  type AppSecrets,
+} from './secrets.ts';
 
 export const DEFAULT_AI_CONFIG: AiProviderConfig = {
   provider: 'gemini',
@@ -116,18 +124,16 @@ export function getServerEnvStatus(): ServerEnvStatus {
     return !placeholders.some((p) => trimmed.startsWith(p));
   };
   return {
-    gemini_key: isSet(process.env.GEMINI_API_KEY, ['MY_GEMINI_API_KEY']),
-    custom_ai_key: isSet(process.env.CUSTOM_AI_API_KEY, ['MY_CUSTOM_AI_API_KEY']),
-    anthropic_key: isSet(process.env.ANTHROPIC_API_KEY, ['MY_ANTHROPIC_API_KEY']),
+    gemini_key: isSecretConfigured('gemini_api_key'),
+    custom_ai_key: isSecretConfigured('custom_ai_api_key'),
+    anthropic_key: isSecretConfigured('anthropic_api_key'),
     youtube_api_key: isYoutubeApiKeyConfigured(),
-    google_client_id: isSet(process.env.GOOGLE_CLIENT_ID, ['MY_GOOGLE_CLIENT_ID']),
-    google_client_secret: isSet(process.env.GOOGLE_CLIENT_SECRET, ['MY_GOOGLE_CLIENT_SECRET']),
+    google_client_id: isSecretConfigured('google_client_id'),
+    google_client_secret: isSecretConfigured('google_client_secret'),
     s3_credentials:
-      isSet(process.env.STORAGE_ACCESS_KEY_ID, ['MY_']) &&
-      isSet(process.env.STORAGE_SECRET_ACCESS_KEY, ['MY_']),
+      isSecretConfigured('storage_access_key_id') && isSecretConfigured('storage_secret_access_key'),
     webdav_credentials:
-      isSet(process.env.WEBDAV_USERNAME, ['MY_']) &&
-      isSet(process.env.WEBDAV_PASSWORD, ['MY_']),
+      isSecretConfigured('webdav_username') && isSecretConfigured('webdav_password'),
     database_url: isSet(process.env.DATABASE_URL, ['MY_', 'postgres://user:pass']),
   };
 }
@@ -154,6 +160,8 @@ export interface StudioDatabase {
   reference_channels: ReferenceChannelRecord[];
   reference_videos: ReferenceVideoRecord[];
   trend_signals: TrendSignalRecord[];
+  /** 后台表单保存的凭据；留空则回退到环境变量 */
+  secrets?: Partial<AppSecrets>;
 }
 
 export function resolveDbPath(overridePath?: string): string {
@@ -926,6 +934,7 @@ function normalizeDbShape(raw: Partial<StudioDatabase>): StudioDatabase {
     reference_channels: raw.reference_channels ?? seed.reference_channels,
     reference_videos: raw.reference_videos ?? seed.reference_videos,
     trend_signals: raw.trend_signals ?? seed.trend_signals,
+    secrets: raw.secrets ?? ({} as Partial<AppSecrets>),
   };
 }
 
@@ -944,6 +953,9 @@ export function loadDb(): StudioDatabase {
   saveDb(cachedDb);
   return cachedDb;
 }
+
+// 让 secrets.ts 能从数据库读取凭据（避免循环 import）
+bindSecretsSource(() => cachedDb?.secrets);
 
 export function saveDb(db: StudioDatabase): void {
   cachedDb = db;
@@ -998,6 +1010,18 @@ export function getChannelScopedState(db: StudioDatabase, channelId: string) {
       allowedAxes: t.allowedAxes,
       jsonSchema: t.jsonSchema,
     })),
+    secrets: SECRET_LABELS.map(({ key, label, hint }) => {
+      const d = describeSecret(key);
+      return {
+        key,
+        env_name: SECRET_ENV_MAP[key],
+        label,
+        hint,
+        configured: d.configured,
+        source: d.source,
+        tail: d.tail,
+      };
+    }),
     melodies: db.melodies.filter((m) => !m.channel_id || m.channel_id === cid),
     specs: channelSpecs,
     renders: db.renders.filter((r) => r.channel_id === cid),

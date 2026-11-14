@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { decryptSecret, signOAuthState } from './crypto.ts';
 import type { CommentRecord, ReferenceVideoRecord, RemoteVideo, VideoRecord } from '../domain/types.ts';
+import { resolveSecret } from './secrets.ts';
 
 export const YOUTUBE_OAUTH_SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -10,13 +11,13 @@ export const YOUTUBE_OAUTH_SCOPES = [
 ];
 
 export function isYoutubeOAuthConfigured(): boolean {
-  const cid = process.env.GOOGLE_CLIENT_ID;
-  const csec = process.env.GOOGLE_CLIENT_SECRET;
+  const cid = resolveSecret('google_client_id');
+  const csec = resolveSecret('google_client_secret');
   return Boolean(cid && csec && !cid.startsWith('MY_') && !csec.startsWith('MY_'));
 }
 
 export function isYoutubeApiKeyConfigured(): boolean {
-  const key = process.env.YOUTUBE_API_KEY;
+  const key = resolveSecret('youtube_api_key');
   return Boolean(key && !key.startsWith('MY_'));
 }
 
@@ -38,7 +39,7 @@ export function getYoutubeRedirectUri(): string {
 }
 
 export function buildYoutubeAuthUrl(channelId: string): { url: string; redirectUri: string } {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientId = resolveSecret('google_client_id');
   if (!clientId || clientId.startsWith('MY_')) {
     throw new Error('未配置 GOOGLE_CLIENT_ID');
   }
@@ -66,8 +67,8 @@ export async function exchangeCodeForYoutubeTokens(code: string): Promise<{
   expires_in: number;
   scope?: string;
 }> {
-  const clientId = process.env.GOOGLE_CLIENT_ID!;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET!;
+  const clientId = resolveSecret('google_client_id')!;
+  const clientSecret = resolveSecret('google_client_secret')!;
   const redirectUri = getYoutubeRedirectUri();
 
   const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -116,8 +117,8 @@ export async function getValidAccessTokenForChannel(
   }
 
   const refreshToken = decryptSecret(encryptedRefreshToken);
-  const clientId = process.env.GOOGLE_CLIENT_ID!;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET!;
+  const clientId = resolveSecret('google_client_id')!;
+  const clientSecret = resolveSecret('google_client_secret')!;
 
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -388,7 +389,7 @@ export async function verifyYoutubeVideoPublicStatus(params: {
   accessToken?: string;
   ytVideoId: string;
 }): Promise<{ privacyStatus: string; uploadStatus: string; isPublic: boolean }> {
-  const apiKey = process.env.YOUTUBE_API_KEY;
+  const apiKey = resolveSecret('youtube_api_key');
   const url = params.accessToken
     ? `https://www.googleapis.com/youtube/v3/videos?part=status&id=${encodeURIComponent(params.ytVideoId)}`
     : `https://www.googleapis.com/youtube/v3/videos?part=status&id=${encodeURIComponent(params.ytVideoId)}&key=${apiKey}`;
@@ -512,7 +513,7 @@ export async function fetchChannelCommentsFromYoutube(params: {
   ytChannelId: string;
   accessToken?: string;
 }): Promise<CommentRecord[]> {
-  const key = process.env.YOUTUBE_API_KEY;
+  const key = resolveSecret('youtube_api_key');
   const base = `https://www.googleapis.com/youtube/v3/commentThreads?part=snippet,replies&allThreadsRelatedToChannelId=${encodeURIComponent(
     params.ytChannelId
   )}&maxResults=25&order=time`;
@@ -675,7 +676,7 @@ export async function pollReferenceChannelOutliers(params: {
 
   let quotaUsed = 0;
   const viewsById = new Map<string, number>();
-  const apiKey = process.env.YOUTUBE_API_KEY;
+  const apiKey = resolveSecret('youtube_api_key');
   if (apiKey && !apiKey.startsWith('MY_')) {
     const statsRes = await fetch(
       `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${entries
@@ -804,7 +805,7 @@ export async function addVideoToYoutubePlaylist(params: {
 }
 
 export async function searchChannelByQuery(query: string): Promise<{ yt_channel_id: string; title: string } | null> {
-  const apiKey = process.env.YOUTUBE_API_KEY;
+  const apiKey = resolveSecret('youtube_api_key');
   if (!apiKey || apiKey.startsWith('MY_')) {
     throw new Error('未配置 YOUTUBE_API_KEY');
   }

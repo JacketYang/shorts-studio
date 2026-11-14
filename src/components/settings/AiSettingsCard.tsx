@@ -1,10 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { Bot, RefreshCw, RotateCcw, Wifi } from 'lucide-react';
+import { Bot, CheckCircle2, KeyRound, RefreshCw, RotateCcw, Trash2, Wifi, XCircle } from 'lucide-react';
 import type { AiProviderConfig, AiProviderType, ThinkingLevel } from '../../domain/types';
+
+export interface SecretItem {
+  key: string;
+  env_name: string;
+  label: string;
+  hint: string;
+  configured: boolean;
+  source: 'db' | 'env' | null;
+  tail: string | null;
+}
 
 interface AiSettingsCardProps {
   aiConfig: AiProviderConfig;
   defaultAiConfig: AiProviderConfig;
+  secrets?: SecretItem[];
   busy: boolean;
   setBusy: (v: boolean) => void;
   onRefresh: () => Promise<void>;
@@ -19,6 +30,7 @@ const PRESET_MODELS: Record<AiProviderType, string[]> = {
 export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
   aiConfig,
   defaultAiConfig,
+  secrets = [],
   busy,
   setBusy,
   onRefresh,
@@ -34,6 +46,60 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
   const [aiSaveMsg, setAiSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [secretDraft, setSecretDraft] = useState<Record<string, string>>({});
+  const [secretMsg, setSecretMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [secretSaving, setSecretSaving] = useState(false);
+
+  const AI_SECRET_KEYS = ['gemini_api_key', 'custom_ai_api_key', 'anthropic_api_key'];
+  const aiSecrets = secrets.filter((s) => AI_SECRET_KEYS.includes(s.key));
+
+  const handleSaveSecrets = async () => {
+    const payload: Record<string, string> = {};
+    for (const [k, v] of Object.entries(secretDraft)) {
+      if (v && v.trim()) payload[k] = v.trim();
+    }
+    if (Object.keys(payload).length === 0) {
+      setSecretMsg({ ok: false, text: '没有填写任何新密钥（留空表示不修改）' });
+      return;
+    }
+    setSecretSaving(true);
+    setSecretMsg(null);
+    try {
+      const res = await fetch('/api/secrets', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secrets: payload }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSecretMsg({ ok: false, text: data.error ?? '保存失败' });
+      } else {
+        setSecretDraft({});
+        setSecretMsg({ ok: true, text: `已保存 ${data.changed?.length ?? 0} 项密钥，立即生效（无需重启）` });
+        await onRefresh();
+      }
+    } catch (err) {
+      setSecretMsg({ ok: false, text: err instanceof Error ? err.message : '网络错误' });
+    } finally {
+      setSecretSaving(false);
+    }
+  };
+
+  const handleClearSecret = async (key: string) => {
+    setSecretSaving(true);
+    try {
+      const res = await fetch(`/api/secrets/${encodeURIComponent(key)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        setSecretMsg({ ok: true, text: `已清除 ${key}` });
+        await onRefresh();
+      } else {
+        setSecretMsg({ ok: false, text: data.error ?? '清除失败' });
+      }
+    } finally {
+      setSecretSaving(false);
+    }
+  };
 
   useEffect(() => {
     setAiProvider(aiConfig.provider);
@@ -164,6 +230,78 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
           <RotateCcw className="h-3.5 w-3.5" />
           恢复默认提示词
         </button>
+      </div>
+
+      {/* ===== 凭据（后台直接填写，不再需要改 .env） ===== */}
+      <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold text-slate-900">AI 密钥（保存在服务端数据库，留空即不修改）</div>
+            <div className="mt-0.5 text-[11px] text-slate-600">
+              填写后立即生效，无需重启服务；明文不经过导出接口，也不会回显到页面。
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={secretSaving || busy}
+            onClick={handleSaveSecrets}
+            className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            {secretSaving ? '保存中…' : '保存密钥'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3 text-xs">
+          {aiSecrets.map((item) => (
+            <div key={item.key} className="space-y-1">
+              <div className="flex items-center justify-between gap-1">
+                <label htmlFor={`secret-${item.key}`} className="block font-medium text-slate-700 truncate">
+                  {item.label}
+                </label>
+                {item.configured ? (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-emerald-700 whitespace-nowrap">
+                    <CheckCircle2 className="h-3 w-3" />
+                    {item.source === 'db' ? '已保存' : '.env'} ··{item.tail}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-amber-700 whitespace-nowrap">
+                    <XCircle className="h-3 w-3" />
+                    未配置
+                  </span>
+                )}
+              </div>
+              <div className="flex gap-1">
+                <input
+                  id={`secret-${item.key}`}
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={secretDraft[item.key] ?? ''}
+                  onChange={(e) => setSecretDraft((prev) => ({ ...prev, [item.key]: e.target.value }))}
+                  placeholder={item.configured ? '已配置，留空不修改' : '粘贴密钥…'}
+                  className="w-full rounded border border-slate-300 bg-white px-2 py-1.5 font-mono text-[11px] text-slate-900 placeholder-slate-400 focus:border-slate-500 focus:outline-none"
+                />
+                {item.configured && item.source === 'db' ? (
+                  <button
+                    type="button"
+                    title="清除后台保存的密钥（回退到 .env）"
+                    disabled={secretSaving}
+                    onClick={() => handleClearSecret(item.key)}
+                    className="shrink-0 rounded border border-slate-300 bg-white px-1.5 text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
+              <div className="text-[10px] text-slate-500">{item.hint}</div>
+            </div>
+          ))}
+        </div>
+
+        {secretMsg ? (
+          <div className={`text-[11px] ${secretMsg.ok ? 'text-emerald-700' : 'text-rose-700'}`}>{secretMsg.text}</div>
+        ) : null}
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4 text-xs">

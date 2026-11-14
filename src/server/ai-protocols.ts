@@ -1,16 +1,14 @@
 import { GoogleGenAI } from '@google/genai';
 import type { AiProviderConfig, AiProviderType, ThinkingLevel } from '../domain/types.ts';
 import { DEFAULT_AI_CONFIG, normalizeAiConfig } from './store.ts';
+import { resolveSecret } from './secrets.ts';
 
 export const GEMINI_MODEL_T1 = 'gemini-4-hydrogen';
 
 export function resolveServerAiKey(provider: AiProviderType): string | null {
-  const custom = process.env.CUSTOM_AI_API_KEY?.trim();
-  const gemini = process.env.GEMINI_API_KEY?.trim();
-  const anthropic = process.env.ANTHROPIC_API_KEY?.trim();
-  const validCustom = custom && !custom.startsWith('MY_') ? custom : null;
-  const validGemini = gemini && gemini !== 'MY_GEMINI_API_KEY' ? gemini : null;
-  const validAnthropic = anthropic && !anthropic.startsWith('MY_') ? anthropic : null;
+  const validCustom = resolveSecret('custom_ai_api_key');
+  const validGemini = resolveSecret('gemini_api_key');
+  const validAnthropic = resolveSecret('anthropic_api_key');
 
   if (provider === 'anthropic') {
     return validAnthropic ?? validCustom ?? validGemini;

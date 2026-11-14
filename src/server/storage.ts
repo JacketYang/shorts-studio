@@ -7,6 +7,7 @@ import type {
   StorageConfig,
   StorageStatusSummary,
 } from '../domain/types.ts';
+import { resolveSecret } from './secrets.ts';
 
 export const DEFAULT_STORAGE_CONFIG: StorageConfig = {
   driver: 'local',
@@ -117,15 +118,15 @@ export function resolveMediaDirectories(cfg: StorageConfig): {
 }
 
 function getS3Credentials(): { accessKeyId: string; secretAccessKey: string } | null {
-  const ak = process.env.STORAGE_ACCESS_KEY_ID?.trim();
-  const sk = process.env.STORAGE_SECRET_ACCESS_KEY?.trim();
+  const ak = resolveSecret('storage_access_key_id');
+  const sk = resolveSecret('storage_secret_access_key');
   if (!ak || !sk || ak.startsWith('MY_') || sk.startsWith('MY_')) return null;
   return { accessKeyId: ak, secretAccessKey: sk };
 }
 
 function getWebDavCredentials(): { username: string; password: string } | null {
-  const username = process.env.WEBDAV_USERNAME?.trim();
-  const password = process.env.WEBDAV_PASSWORD?.trim();
+  const username = resolveSecret('webdav_username');
+  const password = resolveSecret('webdav_password');
   if (!username || !password || username.startsWith('MY_')) return null;
   return { username, password };
 }

@@ -51,11 +51,23 @@ export interface SafeChannelView
   last_synced_at: string | null;
 }
 
+export interface SecretItem {
+  key: string;
+  env_name: string;
+  label: string;
+  hint: string;
+  configured: boolean;
+  source: 'db' | 'env' | null;
+  tail: string | null;
+}
+
 export interface StudioState {
   channel: SafeChannelView;
   profile: ChannelProfile;
   channels: SafeChannelView[];
   templates: TemplateSummary[];
+  /** 凭据脱敏摘要（绝不包含明文） */
+  secrets?: SecretItem[];
   melodies: MelodyEntry[];
   specs: SpecRecord[];
   renders: RenderRecord[];

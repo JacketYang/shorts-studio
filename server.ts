@@ -18,6 +18,13 @@ import {
 } from './src/domain/videospec.ts';
 import { encryptSecret, verifyOAuthState, verifyWorkerSignature } from './src/server/crypto.ts';
 import {
+  SECRET_ENV_MAP,
+  SECRET_LABELS,
+  applySecretPatch,
+  describeSecret,
+  type SecretKey,
+} from './src/server/secrets.ts';
+import {
   draftCommentReplyWithGemini,
   fetchAvailableAiModels,
   generateNextEpisodeSpecsWithGemini,
@@ -1858,6 +1865,88 @@ async function startServer() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // 凭据管理：所有 key/token 都可在后台表单填写，不必再改 .env
+  // ---------------------------------------------------------------------------
+  app.get('/api/secrets', (_req, res) => {
+    const db = loadDb();
+    void db;
+    const items = SECRET_LABELS.map(({ key, label, hint }) => {
+      const d = describeSecret(key);
+      return {
+        key,
+        env_name: SECRET_ENV_MAP[key],
+        label,
+        hint,
+        configured: d.configured,
+        source: d.source,
+        tail: d.tail,
+      };
+    });
+    res.json({ items });
+  });
+
+  app.patch('/api/secrets', (req, res) => {
+    try {
+      const db = loadDb();
+      const { secrets } = req.body ?? {};
+      if (!secrets || typeof secrets !== 'object') {
+        return res.status(400).json({ error: '缺少 secrets 对象' });
+      }
+      db.secrets = applySecretPatch(db.secrets ?? {}, secrets);
+      const changed = Object.keys(secrets).filter((k) => SECRET_ENV_MAP[k as SecretKey]);
+      db.audit_log.unshift({
+        id: `aud-${Date.now().toString(36)}`,
+        channel_id: db.channels[0]?.id ?? 'ch-physics-music',
+        actor: 'operator@shorts-studio',
+        action: 'secrets_updated',
+        entity: 'secrets',
+        payload: { changed_keys: changed },
+        at: new Date().toISOString(),
+      });
+      saveDb(db);
+      const items = SECRET_LABELS.map(({ key, label, hint }) => {
+        const d = describeSecret(key);
+        return {
+          key,
+          env_name: SECRET_ENV_MAP[key],
+          label,
+          hint,
+          configured: d.configured,
+          source: d.source,
+          tail: d.tail,
+        };
+      });
+      res.json({ ok: true, changed, items });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : '保存凭据失败' });
+    }
+  });
+
+  app.delete('/api/secrets/:key', (req, res) => {
+    try {
+      const key = req.params.key as SecretKey;
+      if (!SECRET_ENV_MAP[key]) return res.status(400).json({ error: '未知的凭据字段' });
+      const db = loadDb();
+      const next = { ...(db.secrets ?? {}) };
+      next[key] = '';
+      db.secrets = next;
+      db.audit_log.unshift({
+        id: `aud-${Date.now().toString(36)}`,
+        channel_id: db.channels[0]?.id ?? 'ch-physics-music',
+        actor: 'operator@shorts-studio',
+        action: 'secret_cleared',
+        entity: key,
+        payload: {},
+        at: new Date().toISOString(),
+      });
+      saveDb(db);
+      res.json({ ok: true });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : '清除凭据失败' });
+    }
+  });
+
   app.patch('/api/ai-config', (req, res) => {
     const db = loadDb();
     const { provider, base_url, model, thinking_level, prompts } = req.body ?? {};
@@ -2092,8 +2181,9 @@ async function startServer() {
 
   app.get('/api/export', (_req, res) => {
     const db = loadDb();
+    const { secrets: _omitSecrets, ...rest } = db;
     const sanitized = {
-      ...db,
+      ...rest,
       channels: db.channels.map((c) => ({ ...c, oauth_refresh_token_enc: undefined })),
     };
     res.json(sanitized);
