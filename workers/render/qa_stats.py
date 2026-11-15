@@ -38,7 +38,7 @@ RHYTHM_DEV_MAX_MS = 25.0       # 6) 旋律型平均偏差
 SAFE_TOP = 0.08                # 9) 顶部 8%
 SAFE_BOTTOM = 0.20             # 9) 底部 20%
 ENDING_RATIO_MAX = 0.50        # 10) 首尾帧差 / 中间帧差
-STRONG_EVENT_MIN_INTENSITY = 0.9  # 4) "强事件"的强度门槛
+STRONG_EVENT_MIN_INTENSITY = 0.80  # 4) 强事件门槛（渲染器 intensity 实测 0.65–1.0，0.8 覆盖过光束等主事件）
 ANALYSIS_W, ANALYSIS_H = 160, 284  # 分析用的缩略尺寸（9:16）
 SAMPLE_FPS = 15                    # 抽帧采样率
 
@@ -215,6 +215,12 @@ def check_juice_density(frames, diffs, events):
     if diffs.size == 0:
         return item("juice_density", True, "无法计算", "强事件周围帧差高于全片中位数", "warn")
     med = float(np.median(diffs))
+    if not events:
+        # 拿不到事件表（例如单独用命令行跑 QA）时无法判定，
+        # 不能据此判失败，否则同一份成片会因调用方式不同得出不同结论。
+        return item("juice_density", True, "无事件表，无法判定（需由渲染器调用）",
+                    "≥50% 的强事件周围帧差高于全片中位数", "warn")
+
     strong = [e for e in events if float(e.get("intensity", 0) or 0) >= STRONG_EVENT_MIN_INTENSITY]
     if not strong:
         return item("juice_density", False, f"全片无强事件（intensity ≥ {STRONG_EVENT_MIN_INTENSITY}）",
@@ -234,7 +240,7 @@ def check_juice_density(frames, diffs, events):
                 "≥50% 的强事件周围帧差高于全片中位数", "warn")
 
 
-def check_intensity_rise(diffs):
+def check_intensity_rise(diffs, frames=None):
     """后 30% 的帧间差应显著高于前 30%。
 
     注意 drop / countdown 这类曲线在结尾会主动收束（T9 的循环结尾要求
@@ -250,9 +256,24 @@ def check_intensity_rise(diffs):
     head = float(diffs[:k].mean())
     tail = float(diffs[tail_end - k:tail_end].mean())
     ratio = (tail / head) if head > 1e-6 else float("inf")
+
+    # 附加信息：本频道的成片强度主要落在"发光/亮度"上（球数到达上限后
+    # 运动量饱和，帧差不再增长），所以同时给出亮度比值供审核参考。
+    # 判定仍按任务原文用帧差，不替换指标。
+    lum_note = ""
+    if frames is not None and frames.shape[0] >= 10:
+        lum = frames.astype(np.float32).mean(axis=(1, 2, 3))
+        m = lum.size
+        lk = max(1, int(round(m * 0.3)))
+        lte = max(lk + 1, int(round(m * 0.8)))
+        lh = float(lum[:lk].mean())
+        lt = float(lum[lte - lk:lte].mean())
+        if lh > 1e-6:
+            lum_note = f"；亮度比值 {lt / lh:.2f}（参考）"
+
     return item("intensity_rise", ratio >= INTENSITY_RATIO_MIN,
-                f"比值 {ratio:.2f}（前 30% {head:.2f} / 后段 {tail:.2f}，末尾 20% 不计）",
-                f"≥ {INTENSITY_RATIO_MIN}", "warn")
+                f"帧差比值 {ratio:.2f}（前 30% {head:.2f} / 后段 {tail:.2f}，末尾 20% 不计）{lum_note}",
+                f"帧差 ≥ {INTENSITY_RATIO_MIN}", "warn")
 
 
 def check_rhythm_deviation(events, template):
@@ -379,19 +400,24 @@ def check_ending_return(frames, diffs, spec):
     if frames.shape[0] < 6:
         return item("ending_return", True, "样本不足", "首尾帧差 ≤ 中间帧差的 50%", "warn")
 
-    first, last = frames[0].astype(np.float32), frames[-1].astype(np.float32)
+    first = frames[0].astype(np.float32)
+    last = frames[-1].astype(np.float32)
     end_diff = float(np.abs(last - first).mean())
-    mid = frames[frames.shape[0] // 4: frames.shape[0] * 3 // 4].astype(np.float32)
+
+    # 参照基准必须与"首尾差"同量纲：用"末帧 vs 中间随机帧"，
+    # 而不是"相邻中间帧之间的差"（后者是运动量，量纲完全不同，
+    # 拿它当分母会把正常闭环判成失败）。
+    mid = frames[frames.shape[0] // 4: frames.shape[0] * 3 // 4]
     if mid.shape[0] < 2:
-        return item("ending_return", True, "样本不足", "首尾帧差 ≤ 中间帧差的 50%", "warn")
-    mid_diffs = np.abs(mid[1:] - mid[:-1]).mean(axis=(1, 2, 3))
-    mid_ref = float(np.mean(mid_diffs)) if mid_diffs.size else 0.0
+        return item("ending_return", True, "样本不足", "首尾帧差 ≤ 中间随机帧差的 50%", "warn")
+    mid_f = mid.astype(np.float32)
+    mid_ref = float(np.abs(mid_f - first).mean(axis=(1, 2, 3)).mean())
     if mid_ref <= 1e-6:
-        return item("ending_return", True, f"中间帧几乎静止（{mid_ref:.3f}），无法比较",
-                    "首尾帧差 ≤ 中间帧差的 50%", "warn")
+        return item("ending_return", True, f"中间帧与首帧几乎相同（{mid_ref:.3f}），无法比较",
+                    "首尾帧差 ≤ 中间随机帧差的 50%", "warn")
     ratio = end_diff / mid_ref
     return item("ending_return", ratio <= ENDING_RATIO_MAX,
-                f"首尾帧差 {end_diff:.2f} / 中间 {mid_ref:.2f} = {ratio:.2f}",
+                f"首尾 {end_diff:.2f} / 中间随机帧 {mid_ref:.2f} = {ratio:.2f}",
                 f"≤ {ENDING_RATIO_MAX}", "warn")
 
 
@@ -414,7 +440,7 @@ def analyze(mp4_path: str, payload: dict | None) -> dict:
         check_first_audio_onset(audio, sr),
         check_hook_text_timing(spec),
         check_juice_density(frames, diffs, events),
-        check_intensity_rise(diffs),
+        check_intensity_rise(diffs, frames),
         check_rhythm_deviation(events, template),
         check_audio_layers(audio, sr),
         check_has_twist_moment(diffs),
