@@ -611,20 +611,24 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                 >
                   {COMMON_TIMEZONES.map((tz) => (
                     <option key={tz.id} value={tz.id}>
-                      {tz.label}
+                      {tz.label.replace(/\s*\(UTC[^)]*\)$/, '')} · {timezoneOffsetLabel(tz.id)}
                     </option>
                   ))}
                 </select>
               </div>
               <p className="text-[11px] text-slate-500">
                 必须晚于当前时间 1 分钟。YouTube 会按这个时间自动公开。
-                {schedulePreviewUtc && (
-                  <>
-                    {' '}届时为 UTC <span className="font-mono">{schedulePreviewUtc}</span>
-                    （{timezoneOffsetLabel(scheduleTz, new Date(schedulePreviewUtc))}）。
-                  </>
-                )}
               </p>
+              {schedulePreviewUtc && (
+                // 只给一个 UTC 时间戳，不再追加偏移标签。
+                // 之前写成 "UTC 2026-11-15T15:43:00Z（UTC+8）"：
+                // 末尾的 Z 已经表示 UTC，再跟 "UTC+8" 会让人误以为
+                // 这个 UTC 时间属于 UTC+8，语义自相矛盾。
+                <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-600">
+                  对应 UTC 时间：
+                  <span className="ml-1 font-mono font-medium text-slate-900">{schedulePreviewUtc}</span>
+                </div>
+              )}
               {scheduleError && (
                 <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
                   {scheduleError}
