@@ -237,66 +237,81 @@ class RhythmLock:
     # -- 速度计算 -------------------------------------------------------
 
     def solve_speed(self, t_now, px, py, dx, dy, radius, spd_m=1.0):
-        """撞墙后设速，让"下一次撞墙"正好落在下一个音符上。
+        """撞墙后：判定本次碰撞承载哪个音符，并算出让下一次撞墙对上
+        "下一个未来音符"的速度。
 
-        返回 (speed, note, real_dev)。
-        note 非 None 表示本次碰撞承载该音符并已计入统计。
+        返回 (speed, note, real_dev)。note 非 None 表示本次发声。
 
-        说明：声音在"本次碰撞"发出，但本次碰撞时刻是由上一次设速决定的。
-        所以本次的偏差 = |t_now - note.t|；若不达标就丢弃，并按
-        d/Δt 重新设速，让下一次撞墙对上再下一个音符。
+        规则（严格按任务原文，并为"撞墙次数与音符数不相等"补充处理）：
+        1. 本次碰撞若落在某音符的 ±80ms 内 → 该音符跟随本次碰撞发声
+        2. 否则把"已经过期的音符"一次性记为丢弃（不再逐个空转）
+        3. 剩下最近的一个未来音符，按 d/Δt 设速（限幅到 [0.55,1.8]×base）
         """
         m = spd_m if spd_m > 1e-6 else 1.0
         lo = SPEED_MIN_MULT * self.base_speed
         hi = SPEED_MAX_MULT * self.base_speed
 
+        # 1) 本次碰撞是否命中某个音符
         note = self.schedule.at_index(self.next_index)
         if note is None:
             return None, None, None
-
         real_dev = t_now - note["t"]
-
-        # 本次碰撞命中了当前音符
         if abs(real_dev) <= MAX_TOLERANCE_SEC:
             self.next_index += 1
             self.deviations.append(abs(real_dev))
             self.emitted += 1
-            # 设速瞄准下一个音符
             speed = self._aim_speed(t_now, px, py, dx, dy, radius, m, lo, hi)
             return (speed if speed is not None else self.base_speed), note, real_dev
 
-        # 已经过期（本次碰撞来晚了）：丢弃，并瞄准下一个
-        if real_dev > MAX_TOLERANCE_SEC:
+        # 2) 一次性跳过所有已过期音符（记丢弃），避免逐个空转
+        while True:
+            cur = self.schedule.at_index(self.next_index)
+            if cur is None:
+                break
+            if t_now - cur["t"] <= MAX_TOLERANCE_SEC:
+                break
             self.dropped += 1
             self.next_index += 1
-            speed = self._aim_speed(t_now, px, py, dx, dy, radius, m, lo, hi)
-            return speed, None, real_dev
 
-        # 音符还在前方：本次不发声，按 d/Δt 设速去追
+        # 3) 设速瞄准剩下的最近未来音符
         speed = self._aim_speed(t_now, px, py, dx, dy, radius, m, lo, hi)
         return speed, None, real_dev
 
     def _aim_speed(self, t_now, px, py, dx, dy, radius, m, lo, hi):
-        """算出让"下一次撞墙"落在下一个音符上的速度（已限幅）。"""
-        note = self.schedule.at_index(self.next_index)
+        """算出让"下一次撞墙"落在"下一个尚未过期音符"上的速度（已限幅）。
+
+        注意要向后找第一个时间在未来的音符 —— 若只取 next_index 而它已过期，
+        dt_need 为负，返回 base_speed 会让球速再也不变（死循环）。
+        """
+        # 只向前找"最近一个未来音符"来算速度，但不要在这里推进索引 ——
+        # 索引推进/丢弃由 solve_speed 统一负责，否则会重复计数并跳号。
+        note = None
+        for _skip in range(0, 12):
+            cand = self.schedule.at_index(self.next_index + _skip)
+            if cand is None:
+                break
+            if cand["t"] - t_now > 1e-6:
+                note = cand
+                break
         if note is None:
             return None
         dt_need = note["t"] - t_now
-        if dt_need <= 1e-6:
-            return self.base_speed
 
         angle = self.get_angle(t_now)
         wall_r = radius if self.shape_sides == 0 else radius / math.cos(math.pi / self.shape_sides)
 
+        # 球刚撞墙、位置贴在墙上，射线会有两种极端：
+        #   - step_out=0 时可能立刻打到相邻边（几像素，真实但太短）
+        #   - 推得太远又会穿过场地（失真）
+        # 取"最小正距离"作为真实值：反射后方向朝场内，短距离是物理上
+        # 真实存在的（球贴着墙滑一小段就再撞），正是高频音符需要的。
         dist = None
-        for _so in (0.0, 0.04, 0.08, 0.12, 0.18, 0.25, 0.35, 0.5):
+        for _so in (0.0, 0.01, 0.02, 0.04, 0.08):
             d_try = distance_to_wall(self.shape_sides, self.cx, self.cy, wall_r,
                                      angle, px, py, dx, dy, step_out=radius * _so)
-            if d_try is not None and d_try >= radius * 0.30:
+            if d_try is not None and d_try > 1e-6:
                 dist = d_try
                 break
-            if dist is None and d_try is not None:
-                dist = d_try
         if dist is None or dist <= 1e-9:
             return None
 
