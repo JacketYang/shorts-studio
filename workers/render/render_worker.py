@@ -425,6 +425,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             np.copyto(work_frame, bg_cache)
             # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
             work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
+            # T4：bokeh 光斑以 0.01W/秒漂移（叠加在静态渐变之上，成本可忽略）
+            theme.draw_bokeh(work_frame, t)
             fb = work_frame
 
             if trail_on:
@@ -441,7 +443,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             gfx.draw_line_aa(fb, p0[0], p0[1], p1[0], p1[1], 1.0, (51, 65, 85))
             b0 = zoom_at(z, W * 0.2, pivot_y)
             b1 = zoom_at(z, W * 0.8, pivot_y)
-            gfx.draw_line_aa(fb, b0[0], b0[1], b1[0], b1[1], 2.0, (148, 163, 184))
+            # T4：结构线统一用主题色（调色板首色 85%），不再写死灰色
+            gfx.draw_line_aa(fb, b0[0], b0[1], b1[0], b1[1], 2.0, theme.ui_color, 0.55)
 
             damp_factor = math.exp(-damping * t)
             for i in range(count):
@@ -568,6 +571,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             np.copyto(work_frame, bg_cache)
             # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
             work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
+            # T4：bokeh 光斑以 0.01W/秒漂移（叠加在静态渐变之上，成本可忽略）
+            theme.draw_bokeh(work_frame, t)
             fb = work_frame
 
             if trail_on:
@@ -726,6 +731,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             np.copyto(work_frame, bg_cache)
             # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
             work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
+            # T4：bokeh 光斑以 0.01W/秒漂移（叠加在静态渐变之上，成本可忽略）
+            theme.draw_bokeh(work_frame, t)
             fb = work_frame
 
             if trail_on:
@@ -749,8 +756,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             fl1 = zoom_at(z, 0.45 * W, 0.26 * H)
             fr0 = zoom_at(z, 0.64 * W, 0.16 * H)
             fr1 = zoom_at(z, 0.55 * W, 0.26 * H)
-            gfx.draw_line_aa(fb, fl0[0], fl0[1], fl1[0], fl1[1], rel(0.006), (148, 163, 184))
-            gfx.draw_line_aa(fb, fr0[0], fr0[1], fr1[0], fr1[1], rel(0.006), (148, 163, 184))
+            gfx.draw_line_aa(fb, fl0[0], fl0[1], fl1[0], fl1[1], rel(0.006), theme.ui_color, 0.55)
+            gfx.draw_line_aa(fb, fr0[0], fr0[1], fr1[0], fr1[1], rel(0.006), theme.ui_color, 0.55)
 
             for _pi, (px, py) in enumerate(pegs):
                 sx, sy = zoom_at(z, px * W, py * H)
@@ -1018,6 +1025,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             np.copyto(work_frame, bg_cache)
             # T5：背景亮度倍率 0.9 + 0.2*I（hook_peek 期间 +15%）
             work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
+            # T4：bokeh 光斑以 0.01W/秒漂移（叠加在静态渐变之上，成本可忽略）
+            theme.draw_bokeh(work_frame, t)
             fb = work_frame
 
             if trail_on:

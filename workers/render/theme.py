@@ -147,17 +147,21 @@ class Theme:
     # -- 背景 ----------------------------------------------------------
 
     def build_background(self) -> np.ndarray:
-        """渐变背景 + bokeh 光斑（加色混合），整段只生成一次。"""
+        """纯渐变背景（缓存一次）。光斑由 draw_bokeh 逐帧叠加，才能产生漂移。"""
         fb = gfx.fill_gradient(self.h, self.w, self.bg_top, self.bg_bottom)
-
-        for b in self.bokeh:
-            cx = b.x * self.w
-            cy = b.y * self.h
-            r = b.r * self.w
-            gfx.add_glow(fb, cx, cy, r, b.color, b.alpha)
-
         np.clip(fb, 0.0, 255.0, out=fb)
         return fb
+
+    def draw_bokeh(self, fb: np.ndarray, t: float) -> None:
+        """按 0.01W/秒 的速度漂移并叠加光斑（加色混合）。
+
+        位置 = 初始位置 + 速度 × t，然后对 1.0 取模循环包裹。
+        """
+        for b in self.bokeh:
+            x = (b.x + b.vx * t) % 1.0
+            y = (b.y + b.vy * t) % 1.0
+            gfx.add_glow(fb, x * self.w, y * self.h, b.r * self.w,
+                         b.color, b.alpha)
 
     def advance_bokeh(self, dt: float) -> None:
         """推进光斑漂移（若需要整段动画背景可每帧调用；
