@@ -277,6 +277,23 @@ export async function syncRemoteVideosFromYoutubeApi(params: {
   return { videos: remoteVideos, quotaUsed };
 }
 
+/**
+ * 上传时的发布模式。
+ *
+ * 两种模式都由 YouTube 后台负责，服务器不跑任何定时器：
+ *
+ * - `public_now`：直接以 public 上传，立刻公开。
+ *   官方文档：videos.insert 不写 privacyStatus 时默认就是 public，
+ *   且"未通过审计的 API 项目上传的视频不受 private 限制"。
+ *
+ * - `scheduled`：以 private 上传并带 publishAt，由 YouTube 到点自动转 public。
+ *   官方硬约束：publishAt 只能在 privacyStatus=private 时设置；
+ *   若传 public + publishAt，API 会直接报错。
+ */
+export type UploadPublishMode =
+  | { kind: 'public_now' }
+  | { kind: 'scheduled'; publishAt: string };
+
 export async function resumableUploadVideoToYoutube(params: {
   accessToken: string;
   mp4Path: string;
@@ -286,8 +303,32 @@ export async function resumableUploadVideoToYoutube(params: {
   madeForKids: boolean;
   containsSyntheticMedia: boolean;
   defaultLanguage: string;
-}): Promise<{ ytVideoId: string; privacyStatus: 'private' | 'unlisted' | 'public' }> {
+  /** 发布模式；缺省时沿用旧行为（private + video.scheduled_at） */
+  publishMode?: UploadPublishMode;
+}): Promise<{ ytVideoId: string; privacyStatus: 'private' | 'unlisted' | 'public'; publishAt: string | null }> {
   const fileBuf = fs.readFileSync(params.mp4Path);
+
+  const mode: UploadPublishMode = params.publishMode ?? {
+    kind: 'scheduled',
+    publishAt: params.video.scheduled_at,
+  };
+
+  // 构造 status 块。分两条互斥的路径，避免把 public 和 publishAt 一起发出去。
+  const status: Record<string, unknown> = {
+    selfDeclaredMadeForKids: params.madeForKids,
+    containsSyntheticMedia: params.containsSyntheticMedia,
+  };
+  if (mode.kind === 'public_now') {
+    status.privacyStatus = 'public';
+  } else {
+    const when = new Date(mode.publishAt);
+    if (Number.isNaN(when.getTime())) {
+      throw new Error(`publishAt 时间格式无效：${mode.publishAt}`);
+    }
+    status.privacyStatus = 'private';
+    status.publishAt = when.toISOString();
+  }
+
   const metadata = {
     snippet: {
       title: params.video.title.slice(0, 100),
@@ -297,12 +338,7 @@ export async function resumableUploadVideoToYoutube(params: {
       defaultLanguage: params.defaultLanguage || 'en',
       defaultAudioLanguage: params.defaultLanguage || 'en',
     },
-    status: {
-      privacyStatus: 'private',
-      publishAt: params.video.scheduled_at,
-      selfDeclaredMadeForKids: params.madeForKids,
-      containsSyntheticMedia: params.containsSyntheticMedia,
-    },
+    status,
   };
 
   const initRes = await fetch(
@@ -355,7 +391,8 @@ export async function resumableUploadVideoToYoutube(params: {
 
   return {
     ytVideoId: putData.id,
-    privacyStatus: putData.status?.privacyStatus ?? 'private',
+    privacyStatus: putData.status?.privacyStatus ?? (mode.kind === 'public_now' ? 'public' : 'private'),
+    publishAt: mode.kind === 'scheduled' ? mode.publishAt : null,
   };
 }
 

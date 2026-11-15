@@ -1313,7 +1313,12 @@ async function startServer() {
   app.post('/api/videos/:id/publish', async (req, res) => {
     try {
       const db = loadDb();
-      const { action = 'upload', simulateNetworkDrop = false, manualYoutubeUrl } = req.body ?? {};
+      const {
+        action = 'upload',
+        simulateNetworkDrop = false,
+        manualYoutubeUrl,
+        publishAt,
+      } = req.body ?? ({} as Record<string, unknown>);
       const video = db.videos.find((v) => v.id === req.params.id);
       if (!video) return res.status(404).json({ error: 'Video not found' });
       const channel = db.channels.find((c) => c.id === video.channel_id)!;
@@ -1339,10 +1344,53 @@ async function startServer() {
         return res.json({ video });
       }
 
+      // -----------------------------------------------------------------------
+      // 两种发布模式，定时/公开全部交给 YouTube 后台，服务器不跑任何定时器。
+      //
+      //   publish_now      → privacyStatus: public，立刻公开
+      //   schedule_publish → privacyStatus: private + publishAt，到点 YouTube 自动转 public
+      //
+      // 官方约束：publishAt 只能在 privacyStatus=private 时设置，
+      // 所以这两条路径互斥，不能合并。
+      // -----------------------------------------------------------------------
+      let uploadPublishMode: import('./src/server/youtube.ts').UploadPublishMode | undefined;
+      if (action === 'publish_now') {
+        uploadPublishMode = { kind: 'public_now' };
+      } else if (action === 'schedule_publish') {
+        const raw = String(publishAt ?? '').trim();
+        if (!raw) {
+          return res.status(400).json({ error: '请提供发布时间的 publishAt（ISO 8601）' });
+        }
+        const when = new Date(raw);
+        if (Number.isNaN(when.getTime())) {
+          return res.status(400).json({ error: `发布时间格式无效：${raw}` });
+        }
+        // 留 1 分钟余量，避免请求发出时已变成"过去时间"
+        if (when.getTime() < Date.now() + 60_000) {
+          return res.status(400).json({
+            error: '发布时间必须至少晚于当前时间 1 分钟（YouTube 的 publishAt 需要未来时间）',
+          });
+        }
+        video.scheduled_at = when.toISOString();
+        uploadPublishMode = { kind: 'scheduled', publishAt: when.toISOString() };
+      } else if (action !== 'upload') {
+        return res.status(400).json({ error: `未知的发布动作：${String(action)}` });
+      }
+
       // Real YouTube Data API v3 upload path when OAuth connected & not testing simulated 90% drop
       if (!simulateNetworkDrop && channel.oauth_connected && channel.oauth_refresh_token_enc && specRec) {
-        if (video.yt_video_id && video.state === 'published') {
-          return res.json({ video, alreadyExisted: true, quotaCharged: 0 });
+        // 已经有远端 ID 的（已发布或已交给 YouTube 定时）不要重复上传，
+        // 否则每点一次就烧掉 1600 units 配额。
+        if (video.yt_video_id && (video.state === 'published' || video.state === 'scheduled')) {
+          return res.json({
+            video,
+            alreadyExisted: true,
+            quotaCharged: 0,
+            note:
+              video.state === 'scheduled'
+                ? `该视频已交给 YouTube 定时发布（${video.scheduled_at}），无需重复上传`
+                : undefined,
+          });
         }
         try {
           const accessToken = await getValidAccessTokenForChannel(channel.id, channel.oauth_refresh_token_enc);
@@ -1375,17 +1423,35 @@ async function startServer() {
             madeForKids: specRec.spec.publish.made_for_kids,
             containsSyntheticMedia: specRec.spec.publish.contains_synthetic_media,
             defaultLanguage: specRec.spec.publish.default_language,
+            publishMode: uploadPublishMode,
           });
 
           video.yt_video_id = uploaded.ytVideoId;
           video.privacy = uploaded.privacyStatus;
-          video.state = channel.api_audit_verified ? 'published' : 'semi_manual_pending';
-          video.published_at = channel.api_audit_verified ? new Date().toISOString() : null;
-          video.error_message = channel.api_audit_verified
-            ? null
-            : '已真实上传至 YouTube（私享待公开）。请点击「验证公开权限」确认项目是否已通过合规审计。';
 
-          if (video.first_comment && !video.first_comment_posted) {
+          // 真正的判据是 YouTube 返回的隐私状态，而不是本地的 api_audit_verified。
+          // 官方文档明确：未经审计的项目上传的视频不受 private 限制，
+          // 所以不能再用"能不能公开"来反推审计状态。
+          if (uploaded.privacyStatus === 'public') {
+            video.state = 'published';
+            video.published_at = new Date().toISOString();
+            video.error_message = null;
+          } else if (uploaded.publishAt) {
+            // 已交给 YouTube 定时，到点自动转公开
+            video.state = 'scheduled';
+            video.privacy = 'private';
+            video.published_at = null;
+            video.error_message = `已上传为定时发布，YouTube 将于 ${uploaded.publishAt} 自动公开。`;
+          } else {
+            video.state = 'semi_manual_pending';
+            video.published_at = null;
+            video.error_message =
+              '已真实上传至 YouTube（私享待公开）。请点击「验证公开权限」确认视频可否公开。';
+          }
+
+          // 定时发布的视频在到点前是私享，提前发首评会挂在一条看不见的视频下。
+          // 与 store.ts 的模拟路径保持一致：scheduled 不发首评。
+          if (video.state !== 'scheduled' && video.first_comment && !video.first_comment_posted) {
             try {
               await postFirstCommentOnYoutube({
                 accessToken,
@@ -1434,7 +1500,14 @@ async function startServer() {
         }
       }
 
-      const result = idempotentUploadVideo(db, req.params.id, Boolean(simulateNetworkDrop));
+      // 把发布模式一并传给模拟上传，保证演示与真机语义一致
+      const simMode =
+        uploadPublishMode?.kind === 'public_now'
+          ? ({ kind: 'public_now' } as const)
+          : uploadPublishMode?.kind === 'scheduled'
+            ? ({ kind: 'scheduled', publishAt: uploadPublishMode.publishAt } as const)
+            : undefined;
+      const result = idempotentUploadVideo(db, req.params.id, Boolean(simulateNetworkDrop), simMode);
       saveDb(db);
       res.json(result);
     } catch (err: unknown) {

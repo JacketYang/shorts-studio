@@ -12,6 +12,7 @@ import {
   ShieldAlert,
   ShieldOff,
   UploadCloud,
+  CalendarClock,
 } from 'lucide-react';
 import type { VideoRecord } from '../domain/types';
 import type { StudioState } from '../types/ui';
@@ -33,6 +34,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 定时发布弹窗：选中的视频 + 用户设定的公开时间
+  const [scheduleTarget, setScheduleTarget] = useState<VideoRecord | null>(null);
+  const [scheduleAt, setScheduleAt] = useState<string>('');
   const [renderingId, setRenderingId] = useState<string | null>(null);
   const [renderProgress, setRenderProgress] = useState<{ stage: string; p: number } | null>(null);
 
@@ -50,7 +54,13 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
 
   const handlePublishAction = async (
     videoId: string,
-    opts: { action?: string; simulateNetworkDrop?: boolean; manualYoutubeUrl?: string }
+    opts: {
+      action?: string;
+      simulateNetworkDrop?: boolean;
+      manualYoutubeUrl?: string;
+      /** schedule_publish 用：ISO 时间，由 YouTube 到点自动公开 */
+      publishAt?: string;
+    }
   ) => {
     setBusy(true);
     setStatusMsg(null);
@@ -394,14 +404,26 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                       >
                         模拟90%断网
                       </button>
+                      {/* 两种发布模式，定时全部由 YouTube 后台负责 */}
                       <button
                         type="button"
                         disabled={busy}
-                        onClick={() => handlePublishAction(v.id, { action: 'upload' })}
+                        title="上传为 public，立刻公开（YouTube 后台处理，服务器不设定时器）"
+                        onClick={() => handlePublishAction(v.id, { action: 'publish_now' })}
                         className="inline-flex items-center gap-1 rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
                       >
                         <UploadCloud className="h-3.5 w-3.5" />
-                        {v.state === 'failed' ? '幂等恢复上传' : '上传发布'}
+                        {v.state === 'failed' ? '幂等恢复上传' : '立即发布'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title="上传为 private + publishAt，到点由 YouTube 自动公开"
+                        onClick={() => setScheduleTarget(v)}
+                        className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                      >
+                        <CalendarClock className="h-3.5 w-3.5" />
+                        定时发布
                       </button>
                       {v.yt_video_id && !v.yt_video_id.startsWith('YT_') && (
                         <button
@@ -519,6 +541,100 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* 定时发布弹窗：只收集时间，真正的定时代理是 YouTube */}
+      {scheduleTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="定时发布"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4"
+        >
+          <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 space-y-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">定时发布</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  视频会先上传为「私享」并带上公开时间，<strong>由 YouTube 到点自动转公开</strong>。
+                  本机不运行任何定时任务，关机也不影响。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setScheduleTarget(null)}
+                className="rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="schedule-at" className="block text-xs font-medium text-slate-600">
+                公开时间（本地时区）
+              </label>
+              <input
+                id="schedule-at"
+                type="datetime-local"
+                value={scheduleAt}
+                onChange={(e) => setScheduleAt(e.target.value)}
+                className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+              />
+              <p className="text-[11px] text-slate-500">
+                必须晚于当前时间 1 分钟。YouTube 会按这个时间自动公开。
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { label: '15 分钟后', min: 15 },
+                  { label: '1 小时后', min: 60 },
+                  { label: '3 小时后', min: 180 },
+                  { label: '明天此刻', min: 1440 },
+                ].map((q) => (
+                  <button
+                    key={q.min}
+                    type="button"
+                    onClick={() => {
+                      const d = new Date(Date.now() + q.min * 60_000);
+                      // datetime-local 需要本地时间字符串
+                      const pad = (n: number) => String(n).padStart(2, '0');
+                      setScheduleAt(
+                        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+                      );
+                    }}
+                    className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
+                  >
+                    {q.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setScheduleTarget(null)}
+                className="rounded border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={busy || !scheduleAt}
+                onClick={async () => {
+                  const target = scheduleTarget;
+                  setScheduleTarget(null);
+                  await handlePublishAction(target.id, {
+                    action: 'schedule_publish',
+                    publishAt: new Date(scheduleAt).toISOString(),
+                  });
+                }}
+                className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+              >
+                上传并定时
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

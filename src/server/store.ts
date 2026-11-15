@@ -1258,17 +1258,26 @@ export function approveAndScheduleRender(
   return video;
 }
 
+/**
+ * 发布模式（与 src/server/youtube.ts 的 UploadPublishMode 对应）。
+ * 模拟上传也遵循同一语义，避免"真机一套、演示另一套"。
+ */
+export type SimulatedPublishMode =
+  | { kind: 'public_now' }
+  | { kind: 'scheduled'; publishAt: string };
+
 export function idempotentUploadVideo(
   db: StudioDatabase,
   videoId: string,
-  simulateNetworkDrop = false
+  simulateNetworkDrop = false,
+  publishMode?: SimulatedPublishMode
 ): { video: VideoRecord; alreadyExisted: boolean; quotaCharged: number } {
   const video = db.videos.find((v) => v.id === videoId);
   if (!video) throw new Error('Video not found');
   const channel = db.channels.find((c) => c.id === video.channel_id)!;
 
-  // Idempotency check: if yt_video_id already assigned, never double-upload
-  if (video.yt_video_id && video.state === 'published') {
+  // Idempotency check: 已经有远端 ID 的（已发布 / 已交给 YouTube 定时）不重复上传
+  if (video.yt_video_id && (video.state === 'published' || video.state === 'scheduled')) {
     return { video, alreadyExisted: true, quotaCharged: 0 };
   }
 
@@ -1305,28 +1314,45 @@ export function idempotentUploadVideo(
     video.yt_video_id = `YT_${sha256Hex(video.idempotency_key).slice(0, 9).toUpperCase()}`;
   }
 
-  if (channel.api_audit_verified) {
+  // 发布模式优先：public_now 直接公开；scheduled 交给 YouTube 到点自动公开。
+  // 都不是时退回原来的按审计状态判断（保持向后兼容）。
+  if (publishMode?.kind === 'public_now') {
     video.state = 'published';
     video.privacy = 'public';
     video.published_at = new Date().toISOString();
     video.error_message = null;
-    if (video.first_comment && !video.first_comment_posted) {
-      db.quota_ledger.push({
-        id: `ql-fc-${Date.now().toString(36)}`,
-        project_ref: channel.gcp_project_ref,
-        channel_id: channel.id,
-        date_pt: datePt,
-        units: YOUTUBE_QUOTA_COSTS['commentThreads.insert'],
-        op: 'commentThreads.insert',
-        ref: video.yt_video_id,
-        created_at: new Date().toISOString(),
-      });
-      video.first_comment_posted = true;
-    }
+  } else if (publishMode?.kind === 'scheduled') {
+    video.state = 'scheduled';
+    video.privacy = 'private';
+    video.scheduled_at = publishMode.publishAt;
+    video.published_at = null;
+    video.error_message = `已上传为定时发布，YouTube 将于 ${publishMode.publishAt} 自动公开`;
+  } else if (channel.api_audit_verified) {
+    video.state = 'published';
+    video.privacy = 'public';
+    video.published_at = new Date().toISOString();
+    video.error_message = null;
   } else {
     video.state = 'semi_manual_pending';
     video.privacy = 'private';
     video.error_message = 'API 尚未通过合规审计，上传后保持私享；请使用半手动发布包或切换已审计状态';
+  }
+
+  // 首评：只要视频已经"公开可见"就发。
+  // 定时发布（private + publishAt）在到点前是私享，不应该提前评论，
+  // 所以排除 state === 'scheduled'。
+  if (video.state !== 'scheduled' && video.first_comment && !video.first_comment_posted) {
+    db.quota_ledger.push({
+      id: `ql-fc-${Date.now().toString(36)}`,
+      project_ref: channel.gcp_project_ref,
+      channel_id: channel.id,
+      date_pt: datePt,
+      units: YOUTUBE_QUOTA_COSTS['commentThreads.insert'],
+      op: 'commentThreads.insert',
+      ref: video.yt_video_id,
+      created_at: new Date().toISOString(),
+    });
+    video.first_comment_posted = true;
   }
 
   db.audit_log.unshift({
