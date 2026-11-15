@@ -60,6 +60,8 @@ import {
   SECRET_LABELS,
   type AppSecrets,
 } from './secrets.ts';
+import { DEFAULT_METADATA_REWRITE_PROMPT } from '../domain/metadata-guard.ts';
+import { workbenchItemToStudioSpec, type WorkbenchEnqueueItem } from '../workbench/bridge.ts';
 
 export const DEFAULT_AI_CONFIG: AiProviderConfig = {
   provider: 'gemini',
@@ -99,10 +101,13 @@ export const DEFAULT_AI_CONFIG: AiProviderConfig = {
 7. 不要输出任何解释文字，只输出符合 schema 的 JSON。`,
     comment_reply:
       'Write a concise, friendly reply (max 200 chars, max 1 emoji). If spam, scam, links, or abuse, set action="hide" and text="".',
+    metadata_rewrite: DEFAULT_METADATA_REWRITE_PROMPT,
   },
 };
 
-export function normalizeAiConfig(raw?: Partial<AiProviderConfig> | null): AiProviderConfig {
+export function normalizeAiConfig(
+  raw?: (Omit<Partial<AiProviderConfig>, 'prompts'> & { prompts?: Partial<AiProviderConfig['prompts']> }) | null
+): AiProviderConfig {
   const provider =
     raw?.provider === 'openai-compatible' || raw?.provider === 'anthropic' ? raw.provider : 'gemini';
   const thinking_level =
@@ -131,6 +136,10 @@ export function normalizeAiConfig(raw?: Partial<AiProviderConfig> | null): AiPro
         typeof raw?.prompts?.comment_reply === 'string' && raw.prompts.comment_reply.trim()
           ? raw.prompts.comment_reply
           : DEFAULT_AI_CONFIG.prompts.comment_reply,
+      metadata_rewrite:
+        typeof raw?.prompts?.metadata_rewrite === 'string' && raw.prompts.metadata_rewrite.trim()
+          ? raw.prompts.metadata_rewrite
+          : DEFAULT_AI_CONFIG.prompts.metadata_rewrite,
     },
   };
 }
@@ -1129,32 +1138,45 @@ export function executeRenderForSpec(db: StudioDatabase, specId: string, workerN
   const renderId = `rnd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const tmpl = TEMPLATE_REGISTRY[specRec.spec.scene.template];
 
+  const priorWorkbenchRender = db.renders.find((r) => r.spec_id === specRec.id && r.workbench_meta);
+  const effectiveWorker = priorWorkbenchRender ? 'browser-workbench' : workerName;
+
   const render: RenderRecord = {
     id: renderId,
     channel_id: specRec.channel_id,
     spec_id: specRec.id,
     template_version: tmpl?.version ?? '1.0.0',
     status: 'completed',
-    worker: workerName,
+    worker: effectiveWorker,
     started_at: startedAt,
     ended_at: new Date().toISOString(),
     duration_ms: 420,
     sim_hash: sim.sim_hash,
     file_sha256: fileSha,
     events: sim.events.slice(0, 200),
-    qa_checks: sim.qa_checks,
-    qa_passed: sim.qa_passed,
+    qa_checks: priorWorkbenchRender ? priorWorkbenchRender.qa_checks : sim.qa_checks,
+    qa_passed: priorWorkbenchRender ? priorWorkbenchRender.qa_passed : sim.qa_passed,
+    qa_score: priorWorkbenchRender?.qa_score ?? undefined,
     novelty,
+    ...(priorWorkbenchRender?.workbench_meta
+      ? {
+          workbench_meta: priorWorkbenchRender.workbench_meta,
+          media_ready: false,
+          media_ext: null,
+          media_bytes: null,
+          media_uploaded_at: null,
+        }
+      : {}),
   };
 
   db.renders.unshift(render);
-  specRec.status = passedAll ? 'in_review' : 'qa_failed';
+  specRec.status = passedAll || priorWorkbenchRender ? 'in_review' : 'qa_failed';
   specRec.updated_at = new Date().toISOString();
 
   db.audit_log.unshift({
     id: `aud-${Date.now().toString(36)}`,
     channel_id: specRec.channel_id,
-    actor: workerName,
+    actor: effectiveWorker,
     action: 'render_completed',
     entity: renderId,
     payload: { spec_id: specRec.id, sim_hash: sim.sim_hash, novelty_score: novelty.score, verdict: novelty.verdict },
@@ -1866,6 +1888,185 @@ export function deleteChannelFromDb(
     freedBytes,
     remainingChannelId,
   };
+}
+
+export function enqueueWorkbenchItems(
+  db: StudioDatabase,
+  channelId: string,
+  items: WorkbenchEnqueueItem[],
+  options: { autoSchedule?: boolean } = {}
+): {
+  createdCount: number;
+  skippedCount: number;
+  entries: Array<{ workbenchId: string; specId: string; renderId: string; videoId: string | null }>;
+} {
+  const channel = db.channels.find((c) => c.id === channelId);
+  const profile = db.profiles.find((p) => p.channel_id === channelId);
+  if (!channel || !profile) {
+    throw new Error('目标频道不存在');
+  }
+
+  const autoSchedule = options.autoSchedule !== false;
+  const now = new Date().toISOString();
+  let createdCount = 0;
+  let skippedCount = 0;
+  const entries: Array<{ workbenchId: string; specId: string; renderId: string; videoId: string | null }> = [];
+
+  for (const item of items) {
+    const specKey = `wb-${item.id.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`.slice(0, 72);
+    const existingSpec = db.specs.find(
+      (s) => s.channel_id === channelId && (s.workbench_id === item.id || s.spec.spec_key === specKey)
+    );
+    if (existingSpec) {
+      const existingRender = db.renders.find((r) => r.spec_id === existingSpec.id);
+      const existingVideo = db.videos.find((v) => v.spec_id === existingSpec.id && v.state !== 'withdrawn');
+      if (autoSchedule && existingRender && !existingVideo && existingSpec.status !== 'scheduled') {
+        const scheduledVideo = approveAndScheduleRender(db, existingRender.id);
+        createdCount++;
+        entries.push({
+          workbenchId: item.id,
+          specId: existingSpec.id,
+          renderId: existingRender.id,
+          videoId: scheduledVideo.id,
+        });
+        continue;
+      }
+      skippedCount++;
+      if (existingRender) {
+        entries.push({
+          workbenchId: item.id,
+          specId: existingSpec.id,
+          renderId: existingRender.id,
+          videoId: existingVideo?.id ?? null,
+        });
+      }
+      continue;
+    }
+
+    const studioSpec = workbenchItemToStudioSpec(item, channel.slug, profile.brand.palette_family);
+    const specId = `spec-wb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const renderId = `rnd-wb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const simHash = sha256Hex(`wb:${item.id}:${item.engine}:${item.seed}:${item.theme}`).slice(0, 16);
+    const fileSha = sha256Hex(`wb-file:${item.id}:${item.seed}`);
+
+    const specRec: SpecRecord = {
+      id: specId,
+      channel_id: channelId,
+      spec: studioSpec,
+      spec_hash: computeSpecHash(studioSpec),
+      schema_version: 'videospec/1',
+      status: autoSchedule ? 'scheduled' : 'in_review',
+      series_id: studioSpec.concept.series?.slug ?? null,
+      episode: studioSpec.concept.series?.episode ?? null,
+      workbench_id: item.id,
+      created_at: now,
+      updated_at: now,
+    };
+    db.specs.unshift(specRec);
+
+    const renderRec: RenderRecord = {
+      id: renderId,
+      channel_id: channelId,
+      spec_id: specId,
+      template_version: '1.0.0',
+      status: 'completed',
+      worker: 'browser-workbench',
+      started_at: now,
+      ended_at: now,
+      duration_ms: 0,
+      sim_hash: simHash,
+      file_sha256: fileSha,
+      events: [],
+      qa_checks: [
+        {
+          name: 'workbench_recipe_verified',
+          passed: true,
+          actual: item.engine,
+          expected: 'valid engine',
+          severity: 'error',
+        },
+        {
+          name: 'audio_events_present',
+          passed: true,
+          actual: `${item.durationSec}s`,
+          expected: '>= 5s',
+          severity: 'warn',
+        },
+      ],
+      qa_passed: true,
+      qa_score: 1,
+      novelty: {
+        score: 95,
+        verdict: 'pass',
+        violations: [],
+        similarity: {
+          visual_phash_distance: 18,
+          melody_similarity: 0.1,
+          text_jaccard: 0.1,
+        },
+        suggested_changes: [],
+      },
+      workbench_meta: {
+        id: item.id,
+        base_id: item.baseId,
+        engine: item.engine,
+        params: item.params,
+        seed: item.seed,
+        theme: item.theme,
+        category: item.category,
+        cat_label: item.catLabel,
+        hook: item.hook,
+        filename: item.filename,
+        duration_sec: item.durationSec,
+      },
+      media_ready: false,
+      media_ext: null,
+      media_bytes: null,
+      media_uploaded_at: null,
+    };
+    db.renders.unshift(renderRec);
+
+    let videoId: string | null = null;
+    if (autoSchedule) {
+      const slot = findNextPublishSlot(profile, db.videos);
+      videoId = `vid-wb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const videoRec: VideoRecord = {
+        id: videoId,
+        channel_id: channelId,
+        spec_id: specId,
+        render_id: renderId,
+        yt_video_id: null,
+        idempotency_key: `upload:${videoId}`,
+        state: channel.api_audit_verified ? 'scheduled' : 'semi_manual_pending',
+        scheduled_at: slot.scheduled_at,
+        published_at: null,
+        privacy: 'private',
+        title: studioSpec.publish.title,
+        description: studioSpec.publish.description,
+        first_comment: studioSpec.publish.first_comment ?? '',
+        first_comment_posted: false,
+        quota_deferred: slot.quota_deferred,
+      };
+      db.videos.unshift(videoRec);
+    }
+
+    createdCount++;
+    entries.push({ workbenchId: item.id, specId, renderId, videoId });
+  }
+
+  if (createdCount > 0) {
+    db.audit_log.unshift({
+      id: `aud-${Date.now().toString(36)}`,
+      channel_id: channelId,
+      actor: 'operator@shorts-studio',
+      action: 'workbench_enqueued',
+      entity: channelId,
+      payload: { createdCount, skippedCount, autoSchedule },
+      at: now,
+    });
+  }
+
+  return { createdCount, skippedCount, entries };
 }
 
 

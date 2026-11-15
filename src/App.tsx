@@ -5,6 +5,7 @@ import {
   CheckSquare,
   Clapperboard,
   Compass,
+  Film,
   FolderKanban,
   LayoutDashboard,
   Menu,
@@ -22,12 +23,24 @@ import { ReviewView } from './components/ReviewView';
 import { SettingsView } from './components/SettingsView';
 import { StudioView } from './components/StudioView';
 import { VideosView } from './components/VideosView';
+import { WorkbenchView } from './components/WorkbenchView';
 import type { StudioState } from './types/ui';
 
-type NavTab = 'overview' | 'library' | 'studio' | 'review' | 'calendar' | 'videos' | 'comments' | 'insights' | 'channels';
+type NavTab =
+  | 'overview'
+  | 'workbench'
+  | 'library'
+  | 'studio'
+  | 'review'
+  | 'calendar'
+  | 'videos'
+  | 'comments'
+  | 'insights'
+  | 'channels';
 
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: '总览', icon: LayoutDashboard },
+  { id: 'workbench', label: '视频工坊 (215+)', icon: Film },
   { id: 'library', label: '创意库与导入', icon: FolderKanban },
   { id: 'studio', label: '制作与渲染', icon: Clapperboard },
   { id: 'review', label: '审核队列', icon: CheckSquare },
@@ -207,7 +220,13 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 p-4 md:p-8 max-w-[1360px] w-full mx-auto">
+        <main
+          className={
+            activeTab === 'workbench'
+              ? 'flex-1 p-4 md:p-6 w-full max-w-[1600px] mx-auto'
+              : 'flex-1 p-4 md:p-8 max-w-[1360px] w-full mx-auto'
+          }
+        >
           {loading && !state && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
@@ -228,6 +247,13 @@ export default function App() {
           {state && (
             <>
               {activeTab === 'overview' && <OverviewView state={state} onNavigate={handleNavigate} />}
+              {activeTab === 'workbench' && (
+                <WorkbenchView
+                  state={state}
+                  onRefresh={() => fetchState(state.channel.id)}
+                  onNavigate={handleNavigate}
+                />
+              )}
               {activeTab === 'library' && (
                 <LibraryView
                   state={state}

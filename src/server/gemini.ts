@@ -1,5 +1,11 @@
 import { Type } from '@google/genai';
 import { computeScoreboardAndMix } from '../domain/bandit.ts';
+import {
+  auditPublishMetadata,
+  diversifyMetadataLocal,
+  sanitizeMetadataCandidate,
+  type MetadataAuditReport,
+} from '../domain/metadata-guard.ts';
 import { normalizeTitleForDupCheck, sampleNovelCombos } from '../domain/novelty.ts';
 import { TEMPLATE_REGISTRY } from '../domain/templates.ts';
 import type {
@@ -751,6 +757,224 @@ Return JSON array of 3 objects with fields: idea_key, mechanic, arena, rule, mus
     tokensOut: aiResult.tokensOut,
     costUsd: estimateCost(aiResult.tokensIn, aiResult.tokensOut),
     model: aiResult.model,
+  };
+}
+
+export interface MetadataRewriteRequestItem {
+  id: string;
+  engine: string;
+  category: string;
+  title: string;
+  hookLine: string;
+  description: string;
+  tags: string[];
+  params?: unknown;
+}
+
+export interface MetadataRewriteResultItem {
+  id: string;
+  title: string;
+  hookLine: string;
+  description: string;
+  tags: string[];
+  audit: MetadataAuditReport;
+  source: 'ai' | 'ai+sanitized' | 'local-fallback';
+}
+
+/**
+ * Low-cost batch AI metadata rewriter:
+ * - Packs up to 6 items per request to amortize system prompt tokens
+ * - Caps thinking_level to 'low' (or 'off') for cheap short-form copywriting
+ * - Post-audits every item with sanitizeMetadataCandidate + auditPublishMetadata
+ */
+export async function rewriteMetadataBatchWithAi(params: {
+  channel: Channel;
+  profile: ChannelProfile;
+  items: MetadataRewriteRequestItem[];
+  recentTitles: string[];
+  currentMonthSpendUsd: number;
+  aiConfig?: AiProviderConfig;
+  promptOverride?: string;
+}): Promise<{
+  items: MetadataRewriteResultItem[];
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  model: string;
+}> {
+  assertBudgetAvailable(params.profile, params.currentMonthSpendUsd);
+  const baseCfg = normalizeAiConfig(params.aiConfig ?? DEFAULT_AI_CONFIG);
+  // Cost optimization: copywriting doesn't need 32k deep reasoning
+  const cheapCfg: AiProviderConfig = {
+    ...baseCfg,
+    thinking_level: baseCfg.thinking_level === 'off' ? 'off' : 'low',
+  };
+
+  const sysPrompt =
+    typeof params.promptOverride === 'string' && params.promptOverride.trim()
+      ? params.promptOverride.trim()
+      : baseCfg.prompts.metadata_rewrite;
+
+  const recentSet = [...params.recentTitles];
+  const recentOpeners = recentSet
+    .slice(0, 15)
+    .map((t) => normalizeTitleForDupCheck(t).split(' ').slice(0, 4).join(' '))
+    .filter(Boolean);
+
+  const allOut: MetadataRewriteResultItem[] = [];
+  let totalIn = 0;
+  let totalOut = 0;
+  let usedModel = cheapCfg.model;
+
+  // Chunk into batches of 6 to amortize system instructions while keeping output reliable
+  for (let start = 0; start < params.items.length; start += 6) {
+    const chunk = params.items.slice(start, start + 6);
+    const compactInput = chunk.map((it) => ({
+      id: it.id,
+      engine: it.engine,
+      category: it.category,
+      current_title: it.title.slice(0, 100),
+      current_hook: it.hookLine.slice(0, 60),
+      key_summary: it.description.split('\n')[0]?.slice(0, 160) ?? '',
+    }));
+
+    const prompt = `Channel: ${params.channel.slug} (${params.profile.niche}, locale: ${params.profile.locale})
+Channel forbidden topics (NEVER use): ${JSON.stringify(params.profile.brand.forbidden_topics)}
+Recent title openers to avoid (NEVER start with these): ${JSON.stringify(recentOpeners)}
+Also ensure all ${chunk.length} items in this batch have distinct opening words and angles from each other.
+
+Items to rewrite (${chunk.length}):
+${JSON.stringify(compactInput)}
+
+Return a JSON array of ${chunk.length} objects in the same order with fields: id, title, hook_line, description, tags.`;
+
+    const aiResult = await callStructuredAi({
+      aiConfig: cheapCfg,
+      systemInstruction: sysPrompt,
+      prompt,
+      expectArray: true,
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            title: { type: Type.STRING },
+            hook_line: { type: Type.STRING },
+            description: { type: Type.STRING },
+            tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['id', 'title', 'hook_line', 'description', 'tags'],
+        },
+      },
+    });
+
+    totalIn += aiResult.tokensIn;
+    totalOut += aiResult.tokensOut;
+    usedModel = aiResult.model;
+
+    const parsed = parseJsonArray(aiResult.text);
+    const byId = new Map<string, Record<string, unknown>>();
+    parsed.forEach((row, idx) => {
+      const rowId = typeof row.id === 'string' && row.id ? row.id : chunk[idx]?.id;
+      if (rowId) byId.set(rowId, row);
+    });
+
+    chunk.forEach((orig, idx) => {
+      const draft = byId.get(orig.id) ?? parsed[idx];
+      if (!draft || typeof draft.title !== 'string') {
+        const fb = diversifyMetadataLocal({
+          id: orig.id,
+          engine: orig.engine,
+          category: orig.category,
+          baseTitle: orig.title,
+          hookLine: orig.hookLine,
+          description: orig.description,
+          tags: orig.tags,
+          params: orig.params,
+          recentTitles: recentSet,
+          forbiddenTopics: params.profile.brand.forbidden_topics,
+        });
+        recentSet.unshift(fb.title);
+        allOut.push({
+          id: orig.id,
+          title: fb.title,
+          hookLine: fb.hookLine,
+          description: fb.description,
+          tags: fb.tags,
+          audit: fb.audit,
+          source: 'local-fallback',
+        });
+        return;
+      }
+
+      const rawTags = Array.isArray(draft.tags) ? draft.tags.map(String) : orig.tags;
+      const sanitized = sanitizeMetadataCandidate({
+        title: String(draft.title || orig.title),
+        hookLine: String(draft.hook_line || orig.hookLine),
+        description: String(draft.description || orig.description),
+        tags: rawTags.length > 0 ? rawTags : orig.tags,
+        forbiddenTopics: params.profile.brand.forbidden_topics,
+      });
+
+      const audit = auditPublishMetadata({
+        title: sanitized.title,
+        hookLine: sanitized.hookLine,
+        description: sanitized.description,
+        tags: sanitized.tags,
+        recentTitles: recentSet,
+        forbiddenTopics: params.profile.brand.forbidden_topics,
+      });
+
+      // If AI output still failed a hard rule (e.g., exact duplicate), auto-diversify safely
+      if (!audit.passed) {
+        const fb = diversifyMetadataLocal({
+          id: orig.id,
+          engine: orig.engine,
+          category: orig.category,
+          baseTitle: sanitized.title,
+          hookLine: sanitized.hookLine,
+          description: sanitized.description,
+          tags: sanitized.tags,
+          params: orig.params,
+          recentTitles: recentSet,
+          forbiddenTopics: params.profile.brand.forbidden_topics,
+        });
+        recentSet.unshift(fb.title);
+        allOut.push({
+          id: orig.id,
+          title: fb.title,
+          hookLine: fb.hookLine,
+          description: fb.description,
+          tags: fb.tags,
+          audit: fb.audit,
+          source: 'local-fallback',
+        });
+        return;
+      }
+
+      recentSet.unshift(sanitized.title);
+      const changed =
+        sanitized.title !== String(draft.title).trim() ||
+        sanitized.description !== String(draft.description).trim();
+      allOut.push({
+        id: orig.id,
+        title: sanitized.title,
+        hookLine: sanitized.hookLine,
+        description: sanitized.description,
+        tags: sanitized.tags,
+        audit,
+        source: changed ? 'ai+sanitized' : 'ai',
+      });
+    });
+  }
+
+  return {
+    items: allOut,
+    tokensIn: totalIn,
+    tokensOut: totalOut,
+    costUsd: estimateCost(totalIn, totalOut),
+    model: usedModel,
   };
 }
 

@@ -25,6 +25,8 @@ import {
 } from '../domain/templates';
 import type { MelodyEntry, ValidationIssue, VideoSpec } from '../domain/types';
 import type { StudioState } from '../types/ui';
+import { WORKBENCH_ENGINE_LABELS } from '../workbench/bridge';
+import { WorkbenchCreativeBuilder } from './WorkbenchCreativeBuilder';
 
 type LibrarySubTab = 'specs' | 'custom' | 'ideas' | 'import' | 'templates' | 'melodies';
 
@@ -202,7 +204,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [aiCount, setAiCount] = useState(2);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
 
-  // Custom VideoSpec Builder state
+  // Custom VideoSpec Builder state (工坊 19 引擎推荐模式 vs 基础 4 模板)
+  const [customMode, setCustomMode] = useState<'workbench' | 'legacy'>('workbench');
   const [cTemplate, setCTemplate] = useState<'melody-bounce' | 'ball-sort' | 'pendulum-wave' | 'orbit-sync'>('pendulum-wave');
   const activeTemplateDef = useMemo(
     () => state.templates.find((t) => t.key === cTemplate) ?? state.templates[0],
@@ -670,6 +673,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                     <div className="font-medium text-slate-900">{item.spec.publish.title}</div>
                     <div className="mt-0.5 font-mono text-xs text-slate-500">
                       {item.spec.spec_key} · {item.spec.format.duration_sec}s
+                      {item.workbench_id && (
+                        <span className="ml-1.5 font-sans font-medium text-sky-700">
+                          [工坊 · {WORKBENCH_ENGINE_LABELS[item.spec.axes.mechanic]?.split(' ')[0] ?? item.spec.axes.mechanic}]
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-700">
@@ -719,27 +727,60 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       {/* Custom Visual VideoSpec Builder */}
       {subTab === 'custom' && (
         <div className="rounded-lg border border-slate-200 bg-white p-6 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
             <div>
               <div className="flex items-center gap-2 text-base font-semibold text-slate-900">
                 <Sliders className="h-4 w-4 text-slate-500" />
-                自定义视频与音乐制作台（零 JSON 手写）
+                创意制作台（已接入工坊 19 种高质量音画引擎）
               </div>
               <p className="mt-1 text-xs text-slate-500">
-                直接选择物理模板、场地形状、物理规则、旋律曲目、音色与文案钩子，系统自动生成严格合标的可渲染 VideoSpec 并同步生成预览/MP4。
+                优先使用工坊 19 种可视化物理/数学/旋律引擎制作高完播竖屏创意，可直接进入「制作与渲染」→「审核队列」→「排期」并存入统一存储。
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setSubTab('melodies')}
-              className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-            >
-              <Music className="h-3.5 w-3.5" />
-              先去旋律库自编音乐
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-md border border-slate-200 bg-slate-100 p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setCustomMode('workbench')}
+                  className={`rounded px-3 py-1.5 font-medium transition-colors whitespace-nowrap ${
+                    customMode === 'workbench' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  工坊 19 种音画引擎（推荐）
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCustomMode('legacy')}
+                  className={`rounded px-3 py-1.5 font-medium transition-colors whitespace-nowrap ${
+                    customMode === 'legacy' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  基础 4 模板直出
+                </button>
+              </div>
+              {customMode === 'legacy' && (
+                <button
+                  type="button"
+                  onClick={() => setSubTab('melodies')}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  <Music className="h-3.5 w-3.5" />
+                  旋律库自编音乐
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+          {customMode === 'workbench' ? (
+            <WorkbenchCreativeBuilder
+              state={state}
+              onRefresh={onRefresh}
+              onNavigate={onNavigate}
+              onOpenFullWorkbench={() => onNavigate('workbench')}
+            />
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 text-xs">
             <div>
               <label htmlFor="custom-template" className="block font-medium text-slate-700">
                 物理模板 (Mechanic)
@@ -1000,16 +1041,18 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             >
               仅生成并保存 Spec
             </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => handleSaveCustomSpec(true)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-            >
-              <Play className="h-3.5 w-3.5" />
-              保存并立即渲染预览
-            </button>
-          </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => handleSaveCustomSpec(true)}
+                className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+              >
+                <Play className="h-3.5 w-3.5" />
+                保存并立即渲染预览
+              </button>
+            </div>
+          </>
+          )}
         </div>
       )}
 
@@ -1380,23 +1423,44 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
       {/* Template Registry */}
       {subTab === 'templates' && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {state.templates.map((t) => (
-            <div key={t.key} className="rounded-lg border border-slate-200 bg-white p-5">
-              <div className="flex items-baseline justify-between">
-                <h3 className="text-base font-semibold text-slate-900">{t.name}</h3>
-                <span className="font-mono text-xs text-slate-500">
-                  {t.key}@{t.version}
-                </span>
-              </div>
-              <p className="mt-2 text-sm text-slate-600">{t.description}</p>
-              <div className="mt-4 space-y-1.5 border-t border-slate-100 pt-3 text-xs text-slate-600">
-                <div>可选场地: {t.allowedAxes.arena.join(' / ')}</div>
-                <div>可选规则: {t.allowedAxes.rule.join(' / ')}</div>
-                <div>触发事件: {t.events.join(' · ')}</div>
-              </div>
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white p-5">
+            <div className="space-y-1">
+              <div className="text-sm font-semibold text-slate-900">工坊 19 种高质量音画创意引擎（已接入生产线）</div>
+              <p className="text-xs text-slate-600">
+                涵盖旋律弹跳/雨阵/圆环/裂变、彩色球分拣、12 种排序算法之声、双摆/洛伦兹/万花尺/傅里叶本轮等 19 种高清引擎与 215+ 配方。
+              </p>
             </div>
-          ))}
+            <button
+              type="button"
+              onClick={() => {
+                setCustomMode('workbench');
+                setSubTab('custom');
+              }}
+              className="rounded-md bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap"
+            >
+              打开工坊创意制作台
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {state.templates.map((t) => (
+              <div key={t.key} className="rounded-lg border border-slate-200 bg-white p-5">
+                <div className="flex items-baseline justify-between">
+                  <h3 className="text-base font-semibold text-slate-900">{t.name}</h3>
+                  <span className="font-mono text-xs text-slate-500">
+                    {t.key}@{t.version}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm text-slate-600">{t.description}</p>
+                <div className="mt-4 space-y-1.5 border-t border-slate-100 pt-3 text-xs text-slate-600">
+                  <div>可选场地: {t.allowedAxes.arena.join(' / ')}</div>
+                  <div>可选规则: {t.allowedAxes.rule.join(' / ')}</div>
+                  <div>触发事件: {t.events.join(' · ')}</div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

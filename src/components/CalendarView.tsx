@@ -5,6 +5,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Film,
   List,
   ListPlus,
   Package,
@@ -14,6 +15,9 @@ import {
 } from 'lucide-react';
 import type { VideoRecord } from '../domain/types';
 import type { StudioState } from '../types/ui';
+import { workbenchMetaToWorkbenchSpec } from '../workbench/bridge';
+import { renderVideo } from '../workbench/engine/render';
+import { buildScene, themeOf } from '../workbench/scenes';
 
 interface CalendarViewProps {
   state: StudioState;
@@ -29,6 +33,8 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [renderingId, setRenderingId] = useState<string | null>(null);
+  const [renderProgress, setRenderProgress] = useState<{ stage: string; p: number } | null>(null);
 
   const weekDays = useMemo(() => {
     const base = new Date();
@@ -150,6 +156,54 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
     }
   };
 
+  const handleRenderWorkbenchMedia = async (v: VideoRecord) => {
+    const render = state.renders.find((r) => r.id === v.render_id);
+    const specRec = state.specs.find((s) => s.id === v.spec_id);
+    if (!render?.workbench_meta || !specRec) return;
+
+    setBusy(true);
+    setRenderingId(v.id);
+    setRenderProgress({ stage: '构建音画场景', p: 0 });
+    setStatusMsg(null);
+    try {
+      const wbSpec = workbenchMetaToWorkbenchSpec(
+        render.workbench_meta,
+        v.title,
+        v.description,
+        specRec.spec.publish.tags
+      );
+      const scene = buildScene(wbSpec);
+      const out = await renderVideo(scene, themeOf(wbSpec), wbSpec.hook, {
+        width: 1080,
+        height: 1920,
+        fps: 30,
+        bitrate: 7e6,
+        token: { cancelled: false },
+        onProgress: (p, stage) => setRenderProgress({ stage, p }),
+      });
+      setRenderProgress({ stage: '上传至服务端', p: 0.99 });
+      const upRes = await fetch(`/api/renders/${render.id}/upload-media?ext=${out.ext}`, {
+        method: 'POST',
+        headers: { 'Content-Type': out.ext === 'webm' ? 'video/webm' : 'video/mp4' },
+        body: out.blob,
+      });
+      const upData = await upRes.json().catch(() => ({}));
+      if (!upRes.ok) {
+        setStatusMsg(upData.error ?? '上传成片失败');
+      } else {
+        const mb = ((upData.bytes ?? out.blob.size) / 1048576).toFixed(1);
+        setStatusMsg(`成片已渲染并上传至服务端：「${v.title}」(${out.ext.toUpperCase()} · ${mb} MB)，现在可直接上传发布或下载。`);
+        await onRefresh();
+      }
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : '浏览器渲染成片失败');
+    } finally {
+      setBusy(false);
+      setRenderingId(null);
+      setRenderProgress(null);
+    }
+  };
+
   const quotaPct = Math.min(100, Math.round((state.quota.used_units / state.quota.daily_limit) * 100));
 
   return (
@@ -259,23 +313,45 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
           <table className="w-full text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
-                <th className="px-4 py-3">排期时间 (UTC)</th>
-                <th className="px-4 py-3">标题与幂等键</th>
-                <th className="px-4 py-3">状态 / 隐私</th>
-                <th className="px-4 py-3">远端 ID</th>
-                <th className="px-4 py-3 text-right">发布操作</th>
+                <th className="px-4 py-3 whitespace-nowrap">排期时间 (UTC)</th>
+                <th className="px-4 py-3 whitespace-nowrap">标题与幂等键</th>
+                <th className="px-4 py-3 whitespace-nowrap">状态 / 隐私</th>
+                <th className="px-4 py-3 whitespace-nowrap">远端 ID</th>
+                <th className="px-4 py-3 text-right whitespace-nowrap">发布操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {state.videos.map((v) => (
+              {state.videos.map((v) => {
+                const render = state.renders.find((r) => r.id === v.render_id);
+                const isWorkbench = Boolean(render?.workbench_meta);
+                const isRenderingThis = renderingId === v.id;
+                return (
                 <tr key={v.id} className="hover:bg-slate-50/70">
                   <td className="px-4 py-3 font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
                     {v.scheduled_at.slice(0, 16).replace('T', ' ')}
                     {v.quota_deferred && <div className="text-amber-700">配额顺延</div>}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 min-w-[240px]">
                     <div className="font-medium text-slate-900">{v.title}</div>
-                    <div className="font-mono text-[11px] text-slate-500">{v.idempotency_key}</div>
+                    <div className="font-mono text-[11px] text-slate-500">
+                      {v.idempotency_key}
+                      {isWorkbench && (
+                        <>
+                          {' · '}
+                          <span className={render?.media_ready ? 'text-emerald-700' : 'text-amber-700'}>
+                            {render?.media_ready
+                              ? `工坊成片已就绪 (${((render.media_bytes ?? 0) / 1048576).toFixed(1)} MB)`
+                              : '工坊配方 · 待渲染上传成片'}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {isRenderingThis && renderProgress && (
+                      <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-700">
+                        <span>{renderProgress.stage}</span>
+                        <span className="font-mono tabular-nums">{Math.round(renderProgress.p * 100)}%</span>
+                      </div>
+                    )}
                     {v.error_message && <div className="mt-1 text-xs text-amber-700">{v.error_message}</div>}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-700 whitespace-nowrap">
@@ -286,7 +362,18 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                     {v.yt_video_id ?? '—'}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <div className="flex items-center justify-end gap-1.5">
+                    <div className="flex flex-wrap items-center justify-end gap-1.5 min-w-[280px]">
+                      {isWorkbench && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleRenderWorkbenchMedia(v)}
+                          className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 disabled:opacity-40"
+                        >
+                          <Film className="h-3 w-3" />
+                          {render?.media_ready ? '重渲成片' : '渲染成片'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         disabled={busy}
@@ -374,7 +461,8 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {state.videos.length === 0 && (
                 <tr>
                   <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-500">

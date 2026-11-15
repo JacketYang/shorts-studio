@@ -152,7 +152,15 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
                         {spec?.spec.publish.title ?? rnd.spec_id}
                       </div>
                       <div className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums">
-                        {rnd.worker} · sim:{rnd.sim_hash.slice(0, 10)} · 差异度 {rnd.novelty.score}/100
+                        {rnd.workbench_meta ? `工坊:${rnd.workbench_meta.engine}` : rnd.worker} · sim:{rnd.sim_hash.slice(0, 10)} · 差异度 {rnd.novelty.score}/100
+                        {rnd.workbench_meta && (
+                          <span className={rnd.media_ready ? ' text-emerald-700' : ' text-amber-700'}>
+                            {' · '}
+                            {rnd.media_ready
+                              ? `成片已存 (${((rnd.media_bytes ?? 0) / 1048576).toFixed(1)}M)`
+                              : '待渲染成片'}
+                          </span>
+                        )}
                       </div>
                     </button>
                     <div className="flex items-center gap-2 shrink-0">
@@ -287,10 +295,17 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
                 <div className="flex items-center gap-2">
                   <a
                     href={`/api/renders/${selectedRender.id}/mp4`}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                    className={`inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 ${
+                      selectedRender.workbench_meta && !selectedRender.media_ready ? 'opacity-60' : ''
+                    }`}
+                    title={
+                      selectedRender.workbench_meta && !selectedRender.media_ready
+                        ? '请先点击播放器下方的「渲染 1080p 成片并存入生产线存储」'
+                        : '下载已存入生产线存储的 MP4'
+                    }
                   >
                     <Download className="h-3.5 w-3.5" />
-                    导出 1080p MP4
+                    {selectedRender.workbench_meta && !selectedRender.media_ready ? '待渲染成片' : '导出 1080p MP4'}
                   </a>
                   <button
                     type="button"
@@ -307,6 +322,14 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
                 melody={melodyResolved}
                 renderId={selectedRender?.id ?? null}
                 renderCompleted={selectedRender?.status === 'completed'}
+                workbenchMeta={selectedRender?.workbench_meta ?? null}
+                mediaReady={Boolean(selectedRender?.media_ready)}
+                storageHint={
+                  state.storage_config.driver === 'local'
+                    ? `${state.storage_config.local_dir}/renders`
+                    : `${state.storage_config.driver} 远端存储`
+                }
+                onMediaUploaded={onRefresh}
               />
             </div>
           ) : (
@@ -336,22 +359,24 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
               {state.renders.map((rnd) => {
                 const sp = state.specs.find((s) => s.id === rnd.spec_id);
                 const checked = compRenderIds.includes(rnd.id);
+                const needsWbRender = Boolean(rnd.workbench_meta && !rnd.media_ready);
                 return (
                   <label
                     key={rnd.id}
-                    className={`flex items-center gap-2 rounded border p-2 text-xs cursor-pointer ${
-                      checked ? 'border-slate-900 bg-slate-50' : 'border-slate-200'
-                    }`}
+                    className={`flex items-center gap-2 rounded border p-2 text-xs ${
+                      needsWbRender ? 'cursor-not-allowed opacity-60 border-slate-200 bg-slate-50' : 'cursor-pointer'
+                    } ${checked ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
                   >
                     <input
                       type="checkbox"
                       checked={checked}
+                      disabled={needsWbRender}
                       onChange={() => toggleCompRender(rnd.id)}
                       className="h-3.5 w-3.5 rounded border-slate-300"
                     />
                     <span className="truncate font-medium text-slate-800">{sp?.spec.publish.title ?? rnd.spec_id}</span>
                     <span className="ml-auto font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
-                      {sp?.spec.format.duration_sec ?? 24}s
+                      {needsWbRender ? '待出片' : `${sp?.spec.format.duration_sec ?? 24}s`}
                     </span>
                   </label>
                 );

@@ -1,0 +1,86 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  auditPublishMetadata,
+  DEFAULT_METADATA_REWRITE_PROMPT,
+  diversifyMetadataLocal,
+  sanitizeMetadataCandidate,
+} from './metadata-guard.ts';
+import { buildCatalog } from '../workbench/catalog/catalog.ts';
+
+test('auditPublishMetadata flags title hashtags, excess desc hashtags, spam phrases, and duplicates', () => {
+  const report = auditPublishMetadata({
+    title: 'FREE MONEY 100% IMPOSSIBLE #shorts #satisfying 🔥🚀✨',
+    hookLine: 'This is way too many words for a short safe zone banner',
+    description: 'Watch now.\n#a #b #c #d #e #f #g #h #i #j #k',
+    tags: ['a', 'b'],
+    recentTitles: ['FREE MONEY 100% IMPOSSIBLE'],
+    forbiddenTopics: ['clickbait', 'politics'],
+  });
+
+  assert.equal(report.passed, false);
+  const codes = new Set(report.issues.map((i) => i.code));
+  assert.ok(codes.has('TITLE_HASHTAG_SPAM'));
+  assert.ok(codes.has('TITLE_EXCESS_EMOJI'));
+  assert.ok(codes.has('POLICY_SPAM_PHRASE'));
+  assert.ok(codes.has('DESC_HASHTAG_SPAM'));
+  assert.ok(codes.has('HOOK_TOO_LONG'));
+  assert.ok(codes.has('DUP_EXACT_TITLE'));
+});
+
+test('sanitizeMetadataCandidate strips title hashtags, spam words, and caps description hashtags at 4', () => {
+  const clean = sanitizeMetadataCandidate({
+    title: 'Bouncing Ball Plays Canon #shorts #satisfying #music 🎶🔥✨',
+    hookLine: 'Wait for the final bounce',
+    description: 'A ball bounces to Canon in D.\n\n#shorts #music #a #b #c #d #e',
+    tags: ['music', 'Music', 'canon', 'satisfying'],
+  });
+
+  assert.equal(clean.title.includes('#'), false);
+  const descHashtags = clean.description.match(/#[A-Za-z0-9_]+/g) ?? [];
+  assert.equal(descHashtags.length, 4);
+  assert.deepEqual(clean.tags, ['music', 'canon', 'satisfying']);
+});
+
+test('diversifyMetadataLocal produces diverse, policy-compliant metadata across 25+ catalog recipes with zero AI', () => {
+  const recipes = buildCatalog().slice(0, 30);
+  const accumulatedTitles: string[] = [];
+
+  for (const recipe of recipes) {
+    const raw = recipe.spec(0);
+    const result = diversifyMetadataLocal({
+      id: raw.id,
+      engine: raw.engine,
+      category: raw.category,
+      baseTitle: raw.title,
+      hookLine: raw.hook,
+      description: raw.description,
+      tags: raw.tags,
+      params: raw.params,
+      seed: raw.seed,
+      variant: 0,
+      recentTitles: accumulatedTitles,
+      forbiddenTopics: ['clickbait', 'copyrighted pop songs'],
+    });
+
+    assert.equal(
+      result.audit.passed,
+      true,
+      `Expected ${raw.id} to pass compliance audit, got issues: ${JSON.stringify(result.audit.issues)}`
+    );
+    assert.equal(result.title.includes('#'), false, `Title should not contain #: ${result.title}`);
+    assert.ok(result.audit.stats.hashtagCount <= 4, `Expected <=4 hashtags in desc, got ${result.audit.stats.hashtagCount}`);
+    assert.equal(
+      accumulatedTitles.includes(result.title),
+      false,
+      `Duplicate exact title generated: ${result.title}`
+    );
+    accumulatedTitles.unshift(result.title);
+  }
+});
+
+test('DEFAULT_METADATA_REWRITE_PROMPT enforces anti-duplication, hashtag cap, and safety', () => {
+  assert.ok(DEFAULT_METADATA_REWRITE_PROMPT.includes('NO #hashtags in the title'));
+  assert.ok(DEFAULT_METADATA_REWRITE_PROMPT.includes('3-4 relevant #hashtags'));
+  assert.ok(DEFAULT_METADATA_REWRITE_PROMPT.includes('recent_openers_to_avoid'));
+});

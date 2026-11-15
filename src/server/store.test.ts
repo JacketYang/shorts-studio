@@ -1,6 +1,8 @@
 import {
   DEFAULT_AI_CONFIG,
   deleteChannelFromDb,
+  enqueueWorkbenchItems,
+  executeRenderForSpec,
   expandIdeaRecordToSpec,
   getChannelDataStats,
   getChannelScopedState,
@@ -153,6 +155,7 @@ test('normalizeAiConfig defaults thinking_level to max and supports anthropic + 
   assert.equal(custom.prompts.specgen_system, 'Custom SpecGen prompt');
   assert.equal(custom.prompts.next_episode, DEFAULT_AI_CONFIG.prompts.next_episode);
   assert.equal(custom.prompts.comment_reply, 'Custom comment prompt');
+  assert.equal(custom.prompts.metadata_rewrite, DEFAULT_AI_CONFIG.prompts.metadata_rewrite);
 
   const claude = normalizeAiConfig({
     provider: 'anthropic',
@@ -249,5 +252,44 @@ test('deleteChannelFromDb supports archive retention vs complete wipe of all rec
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test('enqueueWorkbenchItems supports in_review pipeline entry, promotion to scheduled, and preserves workbench_meta on retry', () => {
+  const db = structuredClone(loadDb());
+  const ch = db.channels[0];
+  const sampleItem = {
+    id: 'lorenz-test-01',
+    baseId: 'lorenz-test-01',
+    engine: 'lorenz',
+    params: { sigma: 10, rho: 28, beta: 2.667 },
+    seed: 123456,
+    theme: 2,
+    category: 'math',
+    catLabel: '📐 数学图形',
+    title: 'Lorenz Attractor Butterfly Effect',
+    hook: 'Chaos that never repeats',
+    description: 'Math visualization',
+    tags: ['math', 'chaos'],
+    filename: 'lorenz-test-01',
+    durationSec: 22,
+  };
+
+  const reviewEnq = enqueueWorkbenchItems(db, ch.id, [sampleItem], { autoSchedule: false });
+  assert.equal(reviewEnq.createdCount, 1);
+  assert.equal(reviewEnq.entries[0].videoId, null);
+
+  const specRec = db.specs.find((s) => s.id === reviewEnq.entries[0].specId)!;
+  assert.equal(specRec.status, 'in_review');
+
+  const retriedRender = executeRenderForSpec(db, specRec.id);
+  assert.equal(retriedRender.worker, 'browser-workbench');
+  assert.equal(retriedRender.workbench_meta?.engine, 'lorenz');
+  assert.equal(retriedRender.media_ready, false);
+
+  const promoteEnq = enqueueWorkbenchItems(db, ch.id, [sampleItem], { autoSchedule: true });
+  assert.equal(promoteEnq.createdCount, 1);
+  assert.ok(promoteEnq.entries[0].videoId);
+  assert.equal(specRec.status, 'scheduled');
+});
+
 
 

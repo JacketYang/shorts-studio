@@ -262,6 +262,7 @@ export async function uploadArtifactToStorage(params: {
   }
 
   const fileBuf = fs.readFileSync(params.localFilePath);
+  const contentType = params.fileName.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4';
 
   if (cfg.driver === 's3') {
     const prefix = cfg.s3_prefix ? `${cfg.s3_prefix}/` : '';
@@ -273,7 +274,7 @@ export async function uploadArtifactToStorage(params: {
       bucket: cfg.s3_bucket,
       objectKey,
       body: fileBuf,
-      contentType: 'video/mp4',
+      contentType,
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
@@ -308,7 +309,7 @@ export async function uploadArtifactToStorage(params: {
     method: 'PUT',
     url: fileUrl,
     body: fileBuf,
-    contentType: 'video/mp4',
+    contentType,
   });
   if (!res.ok && res.status !== 201 && res.status !== 204) {
     throw new Error(`WebDAV 上传失败 (HTTP ${res.status})`);
@@ -531,8 +532,8 @@ export function cleanupStorageArtifacts(params: {
   if (params.scope === 'published_renders') {
     const publishedSet = params.publishedRenderIds ?? new Set<string>();
     const isPublishedFile = (name: string) => {
-      if (!name.endsWith('.mp4')) return false;
-      const base = name.replace(/\.mp4$/, '');
+      if (!name.endsWith('.mp4') && !name.endsWith('.webm')) return false;
+      const base = name.replace(/\.(mp4|webm)$/, '');
       return publishedSet.has(base);
     };
     scanAndDelete(dirs.rendersDir, (name) => isPublishedFile(name));
@@ -580,7 +581,7 @@ export function cleanupChannelMediaFiles(params: {
   const purgeMatchingInDir = (dirPath: string, idSet: Set<string>) => {
     if (!fs.existsSync(dirPath) || idSet.size === 0) return;
     for (const entry of fs.readdirSync(dirPath)) {
-      const base = entry.replace(/\.(mp4|json|txt|tmp)$/i, '');
+      const base = entry.replace(/\.(mp4|webm|json|txt|tmp)$/i, '');
       const matched =
         idSet.has(base) || Array.from(idSet).some((id) => entry.startsWith(`${id}.`) || entry.startsWith(`${id}-`));
       if (matched) {

@@ -75,6 +75,9 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
   const [promptSpecgen, setPromptSpecgen] = useState(aiConfig.prompts.specgen_system);
   const [promptNextEp, setPromptNextEp] = useState(aiConfig.prompts.next_episode);
   const [promptComment, setPromptComment] = useState(aiConfig.prompts.comment_reply);
+  const [promptMetadataRewrite, setPromptMetadataRewrite] = useState(
+    aiConfig.prompts.metadata_rewrite ?? defaultAiConfig.prompts.metadata_rewrite
+  );
   const [aiSaveMsg, setAiSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
@@ -93,7 +96,10 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
     setPromptSpecgen(aiConfig.prompts.specgen_system);
     setPromptNextEp(aiConfig.prompts.next_episode);
     setPromptComment(aiConfig.prompts.comment_reply);
-  }, [aiConfig]);
+    setPromptMetadataRewrite(
+      aiConfig.prompts.metadata_rewrite ?? defaultAiConfig.prompts.metadata_rewrite
+    );
+  }, [aiConfig, defaultAiConfig]);
 
   const modelChoices = Array.from(
     new Set([...(fetchedModels.length > 0 ? fetchedModels : PRESET_MODELS[aiProvider]), aiModel].filter(Boolean))
@@ -195,6 +201,7 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
             specgen_system: promptSpecgen,
             next_episode: promptNextEp,
             comment_reply: promptComment,
+            metadata_rewrite: promptMetadataRewrite,
           },
         }),
       });
@@ -217,6 +224,7 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
     setPromptSpecgen(defaultAiConfig.prompts.specgen_system);
     setPromptNextEp(defaultAiConfig.prompts.next_episode);
     setPromptComment(defaultAiConfig.prompts.comment_reply);
+    setPromptMetadataRewrite(defaultAiConfig.prompts.metadata_rewrite);
     setAiSaveMsg({ ok: true, text: '已恢复默认提示词模板，点击「保存 AI 配置」生效。' });
   };
 
@@ -461,6 +469,28 @@ export const AiSettingsCard: React.FC<AiSettingsCardProps> = ({
               className="mt-1 w-full rounded border border-slate-200 bg-slate-50 p-2 font-mono text-[11px] text-slate-900 focus:border-slate-900 focus:outline-none"
             />
           </div>
+        </div>
+      </div>
+
+      {/* 文案改写、防重与合规提示词 */}
+      <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label htmlFor="prompt-metadata-rewrite" className="font-semibold text-slate-800">
+            标题 / 描述 / 钩子智能改写系统提示词（metadata_rewrite · 兼顾防重与合规）
+          </label>
+          <span className="font-mono text-[10px] text-slate-500">
+            自动批量 6 条打包 + low 思考档位降本 · 输出再过本地合规守卫
+          </span>
+        </div>
+        <textarea
+          id="prompt-metadata-rewrite"
+          rows={5}
+          value={promptMetadataRewrite}
+          onChange={(e) => setPromptMetadataRewrite(e.target.value)}
+          className="w-full rounded border border-slate-200 bg-white p-2.5 font-mono text-[11px] text-slate-900 focus:border-slate-900 focus:outline-none"
+        />
+        <div className="text-[11px] leading-relaxed text-slate-600">
+          降本优化建议：① 优先用 <span className="font-mono text-slate-800">gemini-4-hydrogen</span> / <span className="font-mono text-slate-800">gpt-4o-mini</span> / <span className="font-mono text-slate-800">deepseek-chat</span>；② 本接口自动把 6 条打包进同一请求均摊系统提示词，并把推理自动降档至 <span className="font-mono text-slate-800">low</span>；③ 日常 200+ 条可先用「无 AI 本地防重引擎」批量分散，只对精选爆款或撞车条目点 AI 润色。
         </div>
       </div>
 

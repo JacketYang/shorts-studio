@@ -108,7 +108,7 @@ export function findNextPublishSlot(
   const minSpacingMs = 3 * 3600 * 1000;
   const start = new Date(fromDate.getTime() + 2 * 3600 * 1000); // T+2h buffer
 
-  for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
+  for (let dayOffset = 0; dayOffset < 365; dayOffset++) {
     const dayDate = new Date(start.getTime() + dayOffset * 86_400_000);
     const dayPrefix = dayDate.toISOString().slice(0, 10);
     const sameDayCount = existingVideos.filter(

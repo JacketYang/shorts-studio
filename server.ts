@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parseStudioCsv, scoreChannelVideos } from './src/domain/analytics.ts';
+import { auditPublishMetadata, sanitizeMetadataCandidate } from './src/domain/metadata-guard.ts';
 import { computeQuotaSummary, getPacificDateString, YOUTUBE_QUOTA_COSTS } from './src/domain/quota.ts';
 import { FIXTURE_BALL_SORT, FIXTURE_MELODY_BOUNCE, FIXTURE_ORBIT_SYNC, FIXTURE_PENDULUM_WAVE, TEMPLATE_REGISTRY } from './src/domain/templates.ts';
 import type { Channel, ChannelProfile, CompilationChapter, CompilationRecord, QaReport, RejectionReasonTag, RenderRecord, SpecRecord } from './src/domain/types.ts';
@@ -29,6 +30,7 @@ import {
   fetchAvailableAiModels,
   generateNextEpisodeSpecsWithGemini,
   generateSpecBatchWithGemini,
+  rewriteMetadataBatchWithAi,
   runVisualQaWithGemini,
   suggestIdeaBatchWithGemini,
   testAiConnection,
@@ -48,6 +50,7 @@ import {
   deleteRenderCascade,
   deleteSpecCascade,
   deleteIdea,
+  enqueueWorkbenchItems,
   executeRenderForSpec,
   expandIdeaRecordToSpec,
   getChannelDataStats,
@@ -121,15 +124,39 @@ async function ensureRenderedMp4(
   renderId: string,
   spec: SpecRecord['spec'],
   melodies: ReturnType<typeof loadDb>['melodies'],
-  storageConfig: ReturnType<typeof loadDb>['storage_config']
-): Promise<{ mp4File: string; remoteUrl: string | null; qa: QaReport | null }> {
+  storageConfig: ReturnType<typeof loadDb>['storage_config'],
+  renderRecord?: RenderRecord
+): Promise<{ mp4File: string; ext: 'mp4' | 'webm'; remoteUrl: string | null; qa: QaReport | null }> {
   const dirs = resolveMediaDirectories(storageConfig);
   const specFile = path.join(dirs.cacheDir, `${renderId}.json`);
   const mp4File = path.join(dirs.rendersDir, `${renderId}.mp4`);
+  const webmFile = path.join(dirs.rendersDir, `${renderId}.webm`);
   const legacyMp4 = path.resolve(process.cwd(), 'data', 'tmp-renders', `${renderId}.mp4`);
   if (!fs.existsSync(mp4File) && fs.existsSync(legacyMp4)) {
     fs.copyFileSync(legacyMp4, mp4File);
   }
+  if (fs.existsSync(mp4File)) {
+    const qa = readQaReport(path.join(dirs.rendersDir, `${renderId}.qa.json`));
+    return { mp4File, ext: 'mp4', remoteUrl: renderRecord?.remote_url ?? null, qa };
+  }
+  if (fs.existsSync(webmFile)) {
+    const qa = readQaReport(path.join(dirs.rendersDir, `${renderId}.qa.json`));
+    return { mp4File: webmFile, ext: 'webm', remoteUrl: renderRecord?.remote_url ?? null, qa };
+  }
+
+  if (renderRecord?.remote_url) {
+    return {
+      mp4File: '',
+      ext: renderRecord.media_ext ?? 'mp4',
+      remoteUrl: renderRecord.remote_url,
+      qa: readQaReport(path.join(dirs.rendersDir, `${renderId}.qa.json`)),
+    };
+  }
+
+  if (renderRecord?.worker === 'browser-workbench') {
+    throw new Error('该工坊视频尚未在浏览器端渲染并上传成片，请先点击「渲染成片并存入生产线存储」。');
+  }
+
   let remoteUrl: string | null = null;
   if (!fs.existsSync(mp4File)) {
     const melId = spec.audio.music?.melody_ref.source === 'library' ? spec.audio.music.melody_ref.id : undefined;
@@ -154,7 +181,7 @@ async function ensureRenderedMp4(
   }
   // T14：读取渲染器写出的 <renderId>.qa.json（不存在则返回 null）
   const qa = readQaReport(path.join(dirs.rendersDir, `${renderId}.qa.json`));
-  return { mp4File, remoteUrl, qa };
+  return { mp4File, ext: 'mp4', remoteUrl, qa };
 }
 
 async function startServer() {
@@ -731,6 +758,171 @@ async function startServer() {
     }
   });
 
+  app.post('/api/ai/rewrite-metadata', async (req, res) => {
+    try {
+      const db = loadDb();
+      const { channelId, items, promptOverride, applyToSpecs = false } = req.body ?? {};
+      const channel = db.channels.find((c) => c.id === channelId) ?? db.channels[0];
+      const profile = db.profiles.find((p) => p.channel_id === channel.id)!;
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: '请至少提供 1 条待改写文案条目' });
+      }
+      if (items.length > 30) {
+        return res.status(400).json({ error: '单次批量改写上限 30 条，请分批提交以控制费用与稳定性' });
+      }
+
+      const monthPrefix = new Date().toISOString().slice(0, 7);
+      const currentMonthSpendUsd = db.ai_calls
+        .filter((a) => a.channel_id === channel.id && a.created_at.startsWith(monthPrefix))
+        .reduce((sum, a) => sum + a.cost_usd, 0);
+
+      const recentTitles = [
+        ...db.specs.filter((s) => s.channel_id === channel.id).map((s) => s.spec.publish.title),
+        ...db.remote_videos.filter((v) => v.channel_id === channel.id && !v.is_legacy).map((v) => v.title),
+      ].slice(0, 40);
+
+      const result = await rewriteMetadataBatchWithAi({
+        channel,
+        profile,
+        items: items.map((it: Record<string, unknown>, idx: number) => ({
+          id: String(it.id ?? `item-${idx}`),
+          engine: String(it.engine ?? 'hop'),
+          category: String(it.category ?? 'music'),
+          title: String(it.title ?? ''),
+          hookLine: String(it.hookLine ?? it.hook ?? ''),
+          description: String(it.description ?? ''),
+          tags: Array.isArray(it.tags) ? it.tags.map(String) : [],
+          params: it.params,
+        })),
+        recentTitles,
+        currentMonthSpendUsd,
+        aiConfig: db.ai_config,
+        promptOverride: typeof promptOverride === 'string' ? promptOverride : undefined,
+      });
+
+      db.ai_calls.unshift({
+        id: `ai-meta-${Date.now().toString(36)}`,
+        channel_id: channel.id,
+        purpose: 'metadata_rewrite',
+        model: result.model,
+        tokens_in: result.tokensIn,
+        tokens_out: result.tokensOut,
+        cost_usd: result.costUsd,
+        created_at: new Date().toISOString(),
+      });
+
+      if (applyToSpecs) {
+        const now = new Date().toISOString();
+        for (const rewritten of result.items) {
+          const specRec = db.specs.find((s) => s.id === rewritten.id && s.channel_id === channel.id);
+          if (!specRec) continue;
+          specRec.spec.publish.title = rewritten.title;
+          specRec.spec.publish.description = rewritten.description;
+          specRec.spec.publish.tags = rewritten.tags;
+          specRec.spec.concept.working_title = rewritten.title;
+          specRec.spec.concept.hook_line = rewritten.hookLine;
+          specRec.updated_at = now;
+          const hookEvt = specRec.spec.timeline.find((t) => t.type === 'text' && t.role === 'hook');
+          if (hookEvt && hookEvt.type === 'text') hookEvt.text = rewritten.hookLine;
+          for (const r of db.renders) {
+            if (r.spec_id === specRec.id && r.workbench_meta) {
+              r.workbench_meta.hook = rewritten.hookLine;
+            }
+          }
+          for (const v of db.videos) {
+            if (v.spec_id === specRec.id && v.state !== 'published') {
+              v.title = rewritten.title;
+              v.description = rewritten.description;
+            }
+          }
+        }
+      }
+
+      saveDb(db);
+      res.json({
+        items: result.items,
+        model: result.model,
+        tokens_in: result.tokensIn,
+        tokens_out: result.tokensOut,
+        cost_usd: result.costUsd,
+      });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'AI 改写文案失败' });
+    }
+  });
+
+  app.patch('/api/specs/:id/metadata', (req, res) => {
+    try {
+      const db = loadDb();
+      const specRec = db.specs.find((s) => s.id === req.params.id);
+      if (!specRec) return res.status(404).json({ error: 'Spec not found' });
+      const profile = db.profiles.find((p) => p.channel_id === specRec.channel_id);
+
+      const { title, hookLine, description, tags, sanitize = false } = req.body ?? {};
+      const nextTags = Array.isArray(tags)
+        ? tags.map(String).filter(Boolean)
+        : typeof tags === 'string'
+          ? tags
+              .split(/[,，\n]/)
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : specRec.spec.publish.tags;
+
+      const draft = {
+        title: typeof title === 'string' && title.trim() ? title.trim() : specRec.spec.publish.title,
+        hookLine: typeof hookLine === 'string' && hookLine.trim() ? hookLine.trim() : specRec.spec.concept.hook_line,
+        description:
+          typeof description === 'string' && description.trim()
+            ? description.trim()
+            : specRec.spec.publish.description,
+        tags: nextTags,
+      };
+
+      const finalMeta = sanitize
+        ? sanitizeMetadataCandidate({ ...draft, forbiddenTopics: profile?.brand.forbidden_topics })
+        : draft;
+
+      const recentTitles = db.specs
+        .filter((s) => s.channel_id === specRec.channel_id && s.id !== specRec.id)
+        .map((s) => s.spec.publish.title)
+        .slice(0, 40);
+
+      const audit = auditPublishMetadata({
+        ...finalMeta,
+        recentTitles,
+        forbiddenTopics: profile?.brand.forbidden_topics,
+      });
+
+      specRec.spec.publish.title = finalMeta.title.slice(0, 100);
+      specRec.spec.publish.description = finalMeta.description.slice(0, 5000);
+      specRec.spec.publish.tags = finalMeta.tags;
+      specRec.spec.concept.working_title = specRec.spec.publish.title;
+      specRec.spec.concept.hook_line = finalMeta.hookLine.slice(0, 80);
+      specRec.updated_at = new Date().toISOString();
+
+      const hookEvt = specRec.spec.timeline.find((t) => t.type === 'text' && t.role === 'hook');
+      if (hookEvt && hookEvt.type === 'text') {
+        hookEvt.text = specRec.spec.concept.hook_line;
+      }
+      for (const r of db.renders) {
+        if (r.spec_id === specRec.id && r.workbench_meta) {
+          r.workbench_meta.hook = specRec.spec.concept.hook_line;
+        }
+      }
+      for (const v of db.videos) {
+        if (v.spec_id === specRec.id && v.state !== 'published') {
+          v.title = specRec.spec.publish.title;
+          v.description = specRec.spec.publish.description;
+        }
+      }
+
+      saveDb(db);
+      res.json({ spec: specRec, audit });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : '更新文案失败' });
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Render, Visual QA, MP4 Export
   // ---------------------------------------------------------------------------
@@ -798,6 +990,91 @@ async function startServer() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Video Workbench Bridge: Batch Enqueue & Browser-Rendered MP4 Upload
+  // ---------------------------------------------------------------------------
+  app.post('/api/workbench/enqueue', (req, res) => {
+    try {
+      const db = loadDb();
+      const { channelId, items, autoSchedule = true } = req.body ?? {};
+      const targetChannelId = typeof channelId === 'string' && channelId ? channelId : db.channels[0]?.id;
+      if (!targetChannelId) {
+        return res.status(400).json({ error: '缺少目标频道' });
+      }
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: '请至少选择 1 条工坊视频入库' });
+      }
+      const result = enqueueWorkbenchItems(db, targetChannelId, items, { autoSchedule: Boolean(autoSchedule) });
+      saveDb(db);
+      res.json({ ok: true, ...result });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : '工坊视频入库失败' });
+    }
+  });
+
+  app.post(
+    '/api/renders/:id/upload-media',
+    express.raw({ type: ['video/mp4', 'video/webm', 'application/octet-stream'], limit: '150mb' }),
+    async (req, res) => {
+      try {
+        const db = loadDb();
+        const render = db.renders.find((r) => r.id === req.params.id);
+        if (!render) return res.status(404).json({ error: 'Render not found' });
+        if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+          return res.status(400).json({ error: '上传的视频二进制内容为空' });
+        }
+        const ct = String(req.header('content-type') ?? '').toLowerCase();
+        const ext: 'mp4' | 'webm' = req.query.ext === 'webm' || ct.includes('webm') ? 'webm' : 'mp4';
+        const dirs = resolveMediaDirectories(db.storage_config);
+        const mediaPath = path.join(dirs.rendersDir, `${render.id}.${ext}`);
+        fs.writeFileSync(mediaPath, req.body);
+
+        let remoteUrl: string | null = render.remote_url ?? null;
+        if (db.storage_config.driver !== 'local') {
+          try {
+            const uploaded = await uploadArtifactToStorage({
+              cfg: db.storage_config,
+              localFilePath: mediaPath,
+              category: 'renders',
+              fileName: `${render.id}.${ext}`,
+            });
+            remoteUrl = uploaded.remoteUrl;
+          } catch {
+            // Keep local file usable even if cloud sync fails
+          }
+        }
+
+        render.media_ready = true;
+        render.media_ext = ext;
+        render.media_bytes = req.body.length;
+        render.media_uploaded_at = new Date().toISOString();
+        if (remoteUrl) render.remote_url = remoteUrl;
+
+        db.audit_log.unshift({
+          id: `aud-${Date.now().toString(36)}`,
+          channel_id: render.channel_id,
+          actor: 'browser-workbench',
+          action: 'render_media_uploaded',
+          entity: render.id,
+          payload: { ext, bytes: req.body.length, remote_url: remoteUrl },
+          at: render.media_uploaded_at,
+        });
+        saveDb(db);
+        res.json({
+          ok: true,
+          renderId: render.id,
+          ext,
+          bytes: req.body.length,
+          remoteUrl,
+          storagePath: path.relative(process.cwd(), mediaPath),
+          storageDriver: db.storage_config.driver,
+        });
+      } catch (err: unknown) {
+        res.status(500).json({ error: err instanceof Error ? err.message : '上传成片失败' });
+      }
+    }
+  );
+
   app.get('/api/renders/:id/mp4', async (req, res) => {
     try {
       const db = loadDb();
@@ -806,11 +1083,12 @@ async function startServer() {
       const specRec = db.specs.find((s) => s.id === render.spec_id);
       if (!specRec) return res.status(404).json({ error: 'Spec not found' });
 
-      const { mp4File, remoteUrl, qa } = await ensureRenderedMp4(
+      const { mp4File, ext, remoteUrl, qa } = await ensureRenderedMp4(
         render.id,
         specRec.spec,
         db.melodies,
-        db.storage_config
+        db.storage_config,
+        render
       );
       // T14：把自动 QA 结果合并进 RenderRecord（与 sim 侧的 qa_checks 并存）
       mergeAutoQa(render, qa);
@@ -823,9 +1101,10 @@ async function startServer() {
       if (!fs.existsSync(mp4File) && render.remote_url) {
         return res.redirect(render.remote_url);
       }
-      res.download(mp4File, `${specRec.spec.spec_key}.mp4`);
+      res.download(mp4File, `${specRec.spec.spec_key}.${ext}`);
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'MP4 导出失败' });
+      const msg = err instanceof Error ? err.message : 'MP4 导出失败';
+      res.status(msg.includes('浏览器端渲染') ? 409 : 500).json({ error: msg });
     }
   });
 
@@ -862,10 +1141,21 @@ async function startServer() {
       for (const rnd of selectedRenders) {
         const specRec = db.specs.find((s) => s.id === rnd.spec_id);
         if (!specRec) continue;
-        const { mp4File } = await ensureRenderedMp4(rnd.id, specRec.spec, db.melodies, {
-          ...db.storage_config,
-          keep_local_cache_after_upload: true,
-        });
+        const { mp4File } = await ensureRenderedMp4(
+          rnd.id,
+          specRec.spec,
+          db.melodies,
+          {
+            ...db.storage_config,
+            keep_local_cache_after_upload: true,
+          },
+          rnd
+        );
+        if (!mp4File || !fs.existsSync(mp4File)) {
+          return res.status(409).json({
+            error: `片段「${specRec.spec.publish.title}」的成片仅保存在远端存储或尚未渲染，请先确保本地成片存在后再拼接。`,
+          });
+        }
         mp4Paths.push(mp4File);
         chapters.push({
           timecode: formatTimecode(cursorSec),
@@ -1056,11 +1346,13 @@ async function startServer() {
         }
         try {
           const accessToken = await getValidAccessTokenForChannel(channel.id, channel.oauth_refresh_token_enc);
+          const renderRec = db.renders.find((r) => r.id === video.render_id);
           const { mp4File } = await ensureRenderedMp4(
             video.render_id,
             specRec.spec,
             db.melodies,
-            { ...db.storage_config, keep_local_cache_after_upload: true }
+            { ...db.storage_config, keep_local_cache_after_upload: true },
+            renderRec
           );
           const datePt = getPacificDateString();
           db.quota_ledger.push({
@@ -2114,6 +2406,7 @@ async function startServer() {
         specgen_system: prompts?.specgen_system ?? db.ai_config.prompts.specgen_system,
         next_episode: prompts?.next_episode ?? db.ai_config.prompts.next_episode,
         comment_reply: prompts?.comment_reply ?? db.ai_config.prompts.comment_reply,
+        metadata_rewrite: prompts?.metadata_rewrite ?? db.ai_config.prompts.metadata_rewrite,
       },
     });
     db.audit_log.unshift({

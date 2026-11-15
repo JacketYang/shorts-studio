@@ -287,6 +287,20 @@ export interface ChannelProfile {
   ai_budget_monthly_usd: number;
 }
 
+export interface WorkbenchRecipeMeta {
+  id: string;
+  base_id: string;
+  engine: string;
+  params: unknown;
+  seed: number;
+  theme: number;
+  category: string;
+  cat_label: string;
+  hook: string;
+  filename: string;
+  duration_sec: number;
+}
+
 export interface SpecRecord {
   id: string;
   channel_id: string;
@@ -296,6 +310,7 @@ export interface SpecRecord {
   status: SpecLifecycleStatus;
   series_id: string | null;
   episode: number | null;
+  workbench_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -391,6 +406,11 @@ export interface RenderRecord {
   novelty: NoveltyReport;
   visual_qa?: VisualQAResult | null;
   remote_url?: string | null;
+  workbench_meta?: WorkbenchRecipeMeta | null;
+  media_ready?: boolean;
+  media_ext?: 'mp4' | 'webm' | null;
+  media_bytes?: number | null;
+  media_uploaded_at?: string | null;
   error_code?: string | null;
   error_message?: string | null;
 }
@@ -482,7 +502,7 @@ export interface QuotaLedgerEntry {
 export interface AICallEntry {
   id: string;
   channel_id: string;
-  purpose: 'specgen' | 'next_episode' | 'qa_vision' | 'comment_draft';
+  purpose: 'specgen' | 'next_episode' | 'qa_vision' | 'comment_draft' | 'metadata_rewrite';
   model: string;
   tokens_in: number;
   tokens_out: number;
@@ -627,6 +647,7 @@ export interface AiProviderConfig {
     specgen_system: string;
     next_episode: string;
     comment_reply: string;
+    metadata_rewrite: string;
   };
 }
 
