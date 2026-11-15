@@ -515,8 +515,11 @@ def _apply_reverb(bus: np.ndarray, reverb: float, seed: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def render_audio(wav_path: str, spec: dict, events: list, duration: float,
-                 seed: int = 1, arc_cfg=None) -> dict:
-    """生成整段音频并写 WAV，返回统计信息。"""
+                 seed: int = 1, arc_cfg=None, loop_mode: str = "none") -> dict:
+    """生成整段音频并写 WAV，返回统计信息。
+
+    loop_mode 由 arc.parse_loop(spec).effective() 给出，决定结尾处理方式。
+    """
     audio = spec.get("audio") or {}
     mode = audio.get("mode", "sim-driven")
     music = audio.get("music") or {}
@@ -591,9 +594,63 @@ def render_audio(wav_path: str, spec: dict, events: list, duration: float,
     if peak2 > 0.98:
         bus = bus / peak2 * 0.98
 
+    # ---- T9：结尾处理 ----
+    bus = _apply_ending(bus, spec, duration, loop_mode, arc_cfg, events)
+
+    # ---- 统一 30ms 淡出，杜绝尾部爆音 ----
+    n_fade = int(arcmod.MASTER_FADE_SEC * SR)
+    if n_fade > 0 and bus.shape[0] > n_fade:
+        ramp = np.linspace(1.0, 0.0, n_fade, dtype=np.float64)[:, None]
+        bus[-n_fade:] *= ramp
+
     stats["peak"] = float(np.max(np.abs(bus))) if bus.size else 0.0
     _write_wav(wav_path, bus)
     return stats
+
+
+# ---------------------------------------------------------------------------
+# T9：结尾处理
+# ---------------------------------------------------------------------------
+
+def _apply_ending(bus: np.ndarray, spec: dict, duration: float, loop_mode: str,
+                  arc_cfg, events: list) -> np.ndarray:
+    """按 loop_mode 处理结尾，保证"不硬切、不爆音"。
+
+    - visual-return：声音不做特殊处理（画面回环，音频自然结束）
+    - audio-return ：最后 1 秒把主旋律以外的层退掉，最后一个音的尾音
+                      在结束前 0.3 秒淡出
+    - reveal       ：最后 2 秒强度拉到 1.0（音频侧提高整体存在感）
+    - cut          ：结束前 0.08 秒快速淡出
+    """
+    n = bus.shape[0]
+    if n == 0:
+        return bus
+    t_axis = np.arange(n, dtype=np.float64) / SR
+
+    if loop_mode == "audio-return":
+        # 尾音淡出：结束前 0.3 秒
+        left = duration - t_axis
+        fade = np.clip(left / arcmod.TAIL_DECAY_SEC, 0.0, 1.0)
+        bus = bus * fade[:, None]
+        # 最后 1 秒整体轻微收敛（声部退层在合成阶段已按 I 处理，
+        # 这里再叠一层整体收束，让结尾与开头的密度相当）
+        layer = np.clip((left / arcmod.AUDIO_RETURN_SEC), 0.0, 1.0)
+        layer = 0.45 + 0.55 * layer
+        bus = bus * layer[:, None]
+
+    elif loop_mode == "cut":
+        left = duration - t_axis
+        fade = np.clip(left / arcmod.CUT_FADE_SEC, 0.0, 1.0)
+        bus = bus * fade[:, None]
+
+    elif loop_mode == "reveal":
+        # 最后 2 秒提一点整体能量（配合画面的闪白）
+        left = duration - t_axis
+        k = np.clip(1.0 - left / arcmod.REVEAL_SEC, 0.0, 1.0)
+        boost = 1.0 + 0.25 * k
+        bus = bus * boost[:, None]
+
+    return bus
 
 
 def _write_wav(path: str, bus: np.ndarray) -> None:

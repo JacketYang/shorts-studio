@@ -276,3 +276,146 @@ def wall_glow_mult(i: float) -> float:
 def split_interval_mult(i: float) -> float:
     """every_n_bounces 实际取值 = max(1, round(base * (1.4 - 0.8*i)))"""
     return 1.4 - 0.8 * i
+
+
+# ---------------------------------------------------------------------------
+# T9：冷开场预热 + 循环结尾
+# ---------------------------------------------------------------------------
+
+WARMUP_SEC = 0.4
+LOOP_RETURN_SEC = 1.2        # visual-return 的插值窗口
+AUDIO_RETURN_SEC = 1.0       # audio-return 的声部退层窗口
+TAIL_DECAY_SEC = 0.30        # audio-return：尾音在结束前多久淡出
+REVEAL_SEC = 2.0             # ending=reveal 的强度拉升窗口
+REVEAL_FLASH_SEC = 0.30      # 末尾闪白
+CUT_FADE_SEC = 0.08          # ending=cut 的淡出
+MASTER_FADE_SEC = 0.030      # 所有结尾统一的 30ms 淡出到 0
+STATIC_DIFF_THRESHOLD = 0.35 # 头 1.5 秒"安静且静止"告警阈值（平均像素差）
+
+
+class LoopConfig:
+    """解析 format.loop 与 axes.ending。"""
+    __slots__ = ("enabled", "mode", "ending")
+
+    def __init__(self, enabled: bool, mode: str, ending: str):
+        self.enabled = enabled
+        self.mode = mode
+        self.ending = ending
+
+    def effective(self) -> str:
+        """归一化成四种实际行为：visual-return / audio-return / reveal / cut。"""
+        if self.enabled:
+            if self.mode == "visual-return":
+                return "visual-return"
+            if self.mode == "audio-return":
+                return "audio-return"
+            if self.mode == "loop":
+                return "visual-return"
+            # enabled=true 但 mode=none → 退回 ending
+        e = (self.ending or "").strip().lower()
+        if e == "reveal":
+            return "reveal"
+        if e == "cut":
+            return "cut"
+        if e == "loop":
+            return "visual-return"
+        return "none"
+
+    def __repr__(self):
+        return f"LoopConfig(enabled={self.enabled}, mode={self.mode!r}, ending={self.ending!r})"
+
+
+def parse_loop(spec: dict) -> LoopConfig:
+    fmt = spec.get("format") or {}
+    raw = fmt.get("loop")
+    raw = raw if isinstance(raw, dict) else {}
+    enabled = bool(raw.get("enabled", False))
+    mode = str(raw.get("mode", "none") or "none")
+    axes = spec.get("axes") or {}
+    ending = str(axes.get("ending", "") or "")
+    return LoopConfig(enabled, mode, ending)
+
+
+def warmup_frames(warmup_sec: float = WARMUP_SEC, fps: int = 30) -> int:
+    """冷开场预热帧数：模拟这些帧但不输出。"""
+    return max(1, int(round(warmup_sec * fps)))
+
+
+def visual_return_weight(t: float, duration: float,
+                         window: float = LOOP_RETURN_SEC) -> float:
+    """最后 window 秒内，返回 0→1 的插值权重（0=正常，1=完全回到第 0 帧）。"""
+    start = duration - window
+    if t <= start:
+        return 0.0
+    k = (t - start) / window
+    return max(0.0, min(1.0, k))
+
+
+def audio_layer_gain(t: float, duration: float,
+                     window: float = AUDIO_RETURN_SEC) -> float:
+    """audio-return：最后 window 秒内把"除主旋律外的层"逐步退掉。
+
+    返回附加层的保留比例：1.0 → 0.0。
+    """
+    start = duration - window
+    if t <= start:
+        return 1.0
+    k = (t - start) / window
+    return max(0.0, 1.0 - k)
+
+
+def tail_fade_gain(t: float, duration: float,
+                   decay: float = TAIL_DECAY_SEC) -> float:
+    """最后一个音符的尾音：结束前 decay 秒内淡出。"""
+    left = duration - t
+    if left >= decay:
+        return 1.0
+    if left <= 0:
+        return 0.0
+    return left / decay
+
+
+def master_fade_gain(t: float, duration: float,
+                     fade: float = MASTER_FADE_SEC) -> float:
+    """所有视频共用的 30ms 淡出到 0，避免尾部爆音。"""
+    left = duration - t
+    if left >= fade:
+        return 1.0
+    if left <= 0:
+        return 0.0
+    return left / fade
+
+
+def reveal_intensity(t: float, duration: float,
+                     window: float = REVEAL_SEC) -> float:
+    """ending=reveal：最后 window 秒把强度拉到 1.0（返回 0→1 的拉升量）。"""
+    start = duration - window
+    if t <= start:
+        return 0.0
+    k = (t - start) / window
+    return _smoothstep(max(0.0, min(1.0, k)))
+
+
+def reveal_flash(t: float, duration: float,
+                 window: float = REVEAL_FLASH_SEC) -> float:
+    """末尾 window 秒的闪白强度 0→1→（最后一帧最强）。"""
+    start = duration - window
+    if t < start:
+        return 0.0
+    k = (t - start) / window
+    return _smoothstep(max(0.0, min(1.0, k)))
+
+
+def cut_fade(t: float, duration: float, fade: float = CUT_FADE_SEC) -> float:
+    """ending=cut：结束前 fade 秒线性淡出（声音用，避免爆音）。"""
+    return master_fade_gain(t, duration, fade)
+
+
+def cut_last_beat_time(spec: dict) -> float:
+    """ending=cut：取"高潮最高点"的时刻。
+
+    用 climax_at 所在的拍，向下对齐到最近的一次事件级强度峰值 ——
+    这里用 climax_at × duration 作为高潮点。
+    """
+    cfg = parse_arc(spec)
+    return cfg.duration * cfg.climax_at

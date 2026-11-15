@@ -269,6 +269,14 @@ class FxSystem:
 
     # -- 查询 --------------------------------------------------------------
 
+    def clear_transients(self) -> None:
+        """T9：清空所有瞬时效果，用于 visual-return 的最后一帧。"""
+        self.particles.clear()
+        self.ripples.clear()
+        self.pops.clear()
+        self.wall_flashes.clear()
+        self.flash_val = 0.0
+
     def pop_scale(self, ball_key, t: float) -> float:
         """返回该球当前的半径倍率（1.0 表示原尺寸）。"""
         p = self.pops.get(ball_key)
@@ -383,4 +391,3 @@ def celebrate_bin(fx_sys, t, x, y, color, palette, particle_count: int = 30) -> 
                 fx_sys.particles = fx_sys.particles[-MAX_PARTICLES:]
         finally:
             MAX_PARTICLES = old_cap
-

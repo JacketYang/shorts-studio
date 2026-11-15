@@ -377,6 +377,13 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
 
     # T5：强度曲线。I(t) 只影响强度类参数，不改物理/随机序列。
     arc_cfg = arcmod.parse_arc(spec)
+    # T9：冷开场预热帧数（模拟但不输出）
+    _WARMUP_FRAMES = arcmod.warmup_frames(arcmod.WARMUP_SEC, fps)
+    # T9：循环/结尾模式
+    loop_cfg = arcmod.parse_loop(spec)
+    loop_mode = loop_cfg.effective()
+    _first_frame = None          # T9：第 0 帧缓存，用于 visual-return
+    _qa_prev = None              # T9：头 1.5s 静止检测的上一帧缩略
     _fired_beats: dict = {}
     _fired_burst = False
 
@@ -412,8 +419,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
         ghost_buf = np.zeros((H, W, 3), dtype=np.float32)
         GHOST_FADE = 0.92
 
-        for f_idx in range(total_frames):
-            t = f_idx * dt
+        for f_idx in range(total_frames + _WARMUP_FRAMES):
+            t = (f_idx - _WARMUP_FRAMES) * dt      # T9：预热阶段 t<0
             # T5：强度曲线
             _I = arcmod.intensity_of(arc_cfg, t)
             _hp = arcmod.hook_peek_factor(spec, t)
@@ -537,9 +544,38 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             else:
                 _comp = _comp + ghost_buf
             _out = composer.render(fb, _comp, shift=(_dx, _dy), bg=bg_cache)
+            # T9：visual-return —— 最后 1.2 秒把画面向"第 0 帧"插值
+            if loop_mode == "visual-return" and _first_frame is not None:
+                _lr = arcmod.visual_return_weight(t, duration)
+                if _lr > 0:
+                    _out *= (1.0 - _lr)
+                    _out += _first_frame * _lr
+            elif (loop_mode == "visual-return" and _first_frame is None
+                  and f_idx >= _WARMUP_FRAMES):
+                # 只捕获正式输出的第 0 帧（预热帧不能当参照）
+                _first_frame = np.copy(_out)
+            # T9：末尾把粒子/闪光清零
+            if loop_mode == "visual-return":
+                _lr2 = arcmod.visual_return_weight(t, duration)
+                if _lr2 > 0.99:
+                    fx_sys.clear_transients()
             # T6：文字在最后一步叠加，不进入 trail_buffer
             text_layer.draw(_out, t, hud_stats)
-            proc.stdin.write(composer.finish(_out))
+            # T9：头 1.5 秒"安静且静止"告警（QA 用）
+            if f_idx >= _WARMUP_FRAMES:
+                _qa_i = f_idx - _WARMUP_FRAMES
+                if _qa_i < int(1.5 * fps):
+                    _thumb = _out[::16, ::16, :].mean(axis=2)
+                    if _qa_prev is not None:
+                        _d = float(np.abs(_thumb - _qa_prev).mean())
+                        if _d < arcmod.STATIC_DIFF_THRESHOLD:
+                            print(f"  ⚠️ [QA] 第 {_qa_i} 帧（t={t:.2f}s）画面几乎静止，"
+                                  f"帧差 {_d:.3f} < {arcmod.STATIC_DIFF_THRESHOLD}",
+                                  file=sys.stderr)
+                    _qa_prev = _thumb
+            # T9：预热帧只推进模拟、不输出，保证第 0 帧就有运动与拖尾
+            if f_idx >= _WARMUP_FRAMES:
+                proc.stdin.write(composer.finish(_out))
 
     # =====================================================================
     # orbit-sync
@@ -558,8 +594,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
         prev_angles = [trig_rad - 0.16 - i * 0.07 for i in range(count)]
         planet_r = rel(0.012)
 
-        for f_idx in range(total_frames):
-            t = f_idx * dt
+        for f_idx in range(total_frames + _WARMUP_FRAMES):
+            t = (f_idx - _WARMUP_FRAMES) * dt      # T9：预热阶段 t<0
             # T5：强度曲线
             _I = arcmod.intensity_of(arc_cfg, t)
             _hp = arcmod.hook_peek_factor(spec, t)
@@ -667,9 +703,38 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             _dx, _dy = fx_sys.shake_offset(t)
             _out = composer.render(fb, trail_buf.buf if trail_on else None,
                                    shift=(_dx, _dy), bg=bg_cache)
+            # T9：visual-return —— 最后 1.2 秒把画面向"第 0 帧"插值
+            if loop_mode == "visual-return" and _first_frame is not None:
+                _lr = arcmod.visual_return_weight(t, duration)
+                if _lr > 0:
+                    _out *= (1.0 - _lr)
+                    _out += _first_frame * _lr
+            elif (loop_mode == "visual-return" and _first_frame is None
+                  and f_idx >= _WARMUP_FRAMES):
+                # 只捕获正式输出的第 0 帧（预热帧不能当参照）
+                _first_frame = np.copy(_out)
+            # T9：末尾把粒子/闪光清零
+            if loop_mode == "visual-return":
+                _lr2 = arcmod.visual_return_weight(t, duration)
+                if _lr2 > 0.99:
+                    fx_sys.clear_transients()
             # T6：文字在最后一步叠加，不进入 trail_buffer
             text_layer.draw(_out, t, hud_stats)
-            proc.stdin.write(composer.finish(_out))
+            # T9：头 1.5 秒"安静且静止"告警（QA 用）
+            if f_idx >= _WARMUP_FRAMES:
+                _qa_i = f_idx - _WARMUP_FRAMES
+                if _qa_i < int(1.5 * fps):
+                    _thumb = _out[::16, ::16, :].mean(axis=2)
+                    if _qa_prev is not None:
+                        _d = float(np.abs(_thumb - _qa_prev).mean())
+                        if _d < arcmod.STATIC_DIFF_THRESHOLD:
+                            print(f"  ⚠️ [QA] 第 {_qa_i} 帧（t={t:.2f}s）画面几乎静止，"
+                                  f"帧差 {_d:.3f} < {arcmod.STATIC_DIFF_THRESHOLD}",
+                                  file=sys.stderr)
+                    _qa_prev = _thumb
+            # T9：预热帧只推进模拟、不输出，保证第 0 帧就有运动与拖尾
+            if f_idx >= _WARMUP_FRAMES:
+                proc.stdin.write(composer.finish(_out))
 
     # =====================================================================
     # ball-sort
@@ -718,8 +783,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
         peg_r = rel(0.011)
         bin_h = 0.13 * H
 
-        for f_idx in range(total_frames):
-            t = f_idx * dt
+        for f_idx in range(total_frames + _WARMUP_FRAMES):
+            t = (f_idx - _WARMUP_FRAMES) * dt      # T9：预热阶段 t<0
             # T5：强度曲线
             _I = arcmod.intensity_of(arc_cfg, t)
             _hp = arcmod.hook_peek_factor(spec, t)
@@ -925,9 +990,38 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             hud_stats["bins_filled"] = sum(1 for c in bin_counts if c >= BIN_FULL)
             _out = composer.render(fb, trail_buf.buf if trail_on else None,
                                    shift=(_dx, _dy), bg=bg_cache)
+            # T9：visual-return —— 最后 1.2 秒把画面向"第 0 帧"插值
+            if loop_mode == "visual-return" and _first_frame is not None:
+                _lr = arcmod.visual_return_weight(t, duration)
+                if _lr > 0:
+                    _out *= (1.0 - _lr)
+                    _out += _first_frame * _lr
+            elif (loop_mode == "visual-return" and _first_frame is None
+                  and f_idx >= _WARMUP_FRAMES):
+                # 只捕获正式输出的第 0 帧（预热帧不能当参照）
+                _first_frame = np.copy(_out)
+            # T9：末尾把粒子/闪光清零
+            if loop_mode == "visual-return":
+                _lr2 = arcmod.visual_return_weight(t, duration)
+                if _lr2 > 0.99:
+                    fx_sys.clear_transients()
             # T6：文字在最后一步叠加，不进入 trail_buffer
             text_layer.draw(_out, t, hud_stats)
-            proc.stdin.write(composer.finish(_out))
+            # T9：头 1.5 秒"安静且静止"告警（QA 用）
+            if f_idx >= _WARMUP_FRAMES:
+                _qa_i = f_idx - _WARMUP_FRAMES
+                if _qa_i < int(1.5 * fps):
+                    _thumb = _out[::16, ::16, :].mean(axis=2)
+                    if _qa_prev is not None:
+                        _d = float(np.abs(_thumb - _qa_prev).mean())
+                        if _d < arcmod.STATIC_DIFF_THRESHOLD:
+                            print(f"  ⚠️ [QA] 第 {_qa_i} 帧（t={t:.2f}s）画面几乎静止，"
+                                  f"帧差 {_d:.3f} < {arcmod.STATIC_DIFF_THRESHOLD}",
+                                  file=sys.stderr)
+                    _qa_prev = _thumb
+            # T9：预热帧只推进模拟、不输出，保证第 0 帧就有运动与拖尾
+            if f_idx >= _WARMUP_FRAMES:
+                proc.stdin.write(composer.finish(_out))
 
     # =====================================================================
     # melody-bounce（默认分支）
@@ -1008,8 +1102,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                 _b0["vx"], _b0["vy"] = _pv
         gravity_sign = 1.0
 
-        for f_idx in range(total_frames):
-            t = f_idx * dt
+        for f_idx in range(total_frames + _WARMUP_FRAMES):
+            t = (f_idx - _WARMUP_FRAMES) * dt      # T9：预热阶段 t<0
             # T5：强度曲线
             _I = arcmod.intensity_of(arc_cfg, t)
             _hp = arcmod.hook_peek_factor(spec, t)
@@ -1255,9 +1349,38 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
             _dx, _dy = fx_sys.shake_offset(t)
             _out = composer.render(fb, trail_buf.buf if trail_on else None,
                                    shift=(_dx, _dy), bg=bg_cache)
+            # T9：visual-return —— 最后 1.2 秒把画面向"第 0 帧"插值
+            if loop_mode == "visual-return" and _first_frame is not None:
+                _lr = arcmod.visual_return_weight(t, duration)
+                if _lr > 0:
+                    _out *= (1.0 - _lr)
+                    _out += _first_frame * _lr
+            elif (loop_mode == "visual-return" and _first_frame is None
+                  and f_idx >= _WARMUP_FRAMES):
+                # 只捕获正式输出的第 0 帧（预热帧不能当参照）
+                _first_frame = np.copy(_out)
+            # T9：末尾把粒子/闪光清零
+            if loop_mode == "visual-return":
+                _lr2 = arcmod.visual_return_weight(t, duration)
+                if _lr2 > 0.99:
+                    fx_sys.clear_transients()
             # T6：文字在最后一步叠加，不进入 trail_buffer
             text_layer.draw(_out, t, hud_stats)
-            proc.stdin.write(composer.finish(_out))
+            # T9：头 1.5 秒"安静且静止"告警（QA 用）
+            if f_idx >= _WARMUP_FRAMES:
+                _qa_i = f_idx - _WARMUP_FRAMES
+                if _qa_i < int(1.5 * fps):
+                    _thumb = _out[::16, ::16, :].mean(axis=2)
+                    if _qa_prev is not None:
+                        _d = float(np.abs(_thumb - _qa_prev).mean())
+                        if _d < arcmod.STATIC_DIFF_THRESHOLD:
+                            print(f"  ⚠️ [QA] 第 {_qa_i} 帧（t={t:.2f}s）画面几乎静止，"
+                                  f"帧差 {_d:.3f} < {arcmod.STATIC_DIFF_THRESHOLD}",
+                                  file=sys.stderr)
+                    _qa_prev = _thumb
+            # T9：预热帧只推进模拟、不输出，保证第 0 帧就有运动与拖尾
+            if f_idx >= _WARMUP_FRAMES:
+                proc.stdin.write(composer.finish(_out))
 
     # T8：节奏对齐统计（仅 melody-bounce 且启用锁定时有意义）
     try:
@@ -1318,7 +1441,8 @@ def render_mp4(payload_path: str, output_mp4: str):
 
         # T7：改为 numpy 向量化立体声合成
         audiomod.render_audio(wav_path, spec, events, duration,
-                              seed=P_audio_seed, arc_cfg=arc_cfg_for_audio)
+                              seed=P_audio_seed, arc_cfg=arc_cfg_for_audio,
+                              loop_mode=arcmod.parse_loop(spec).effective())
 
         mux_cmd = [
             "ffmpeg",
