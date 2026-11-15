@@ -1,19 +1,38 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Eye, EyeOff, Pause, Play, RotateCcw, Volume2, VolumeX } from 'lucide-react';
-import { runDeterministicSimulation } from '../domain/simulation';
+import { Eye, EyeOff, Film, Pause, Play, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import {
+  arcIntensity,
+  bgBrightnessMult,
+  hookPeekFactor,
+  particleMult,
+  resolveArcConfig,
+  resolveFxConfig,
+  runDeterministicSimulation,
+  zoomMult,
+} from '../domain/simulation';
 import type { MelodyEntry, VideoSpec } from '../domain/types';
 
 interface SimulationPlayerProps {
   spec: VideoSpec;
   melody?: MelodyEntry;
   compact?: boolean;
+  /** T11：若该 spec 已渲染出 MP4，传入 render id 后可在"看成片"里播放 */
+  renderId?: string | null;
+  /** T11：该 render 是否已 completed（只有完成才有 MP4） */
+  renderCompleted?: boolean;
 }
 
 function midiToFreq(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody, compact = false }) => {
+export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({
+  spec,
+  melody,
+  compact = false,
+  renderId = null,
+  renderCompleted = false,
+}) => {
   const sim = useMemo(() => runDeterministicSimulation(spec, melody), [spec, melody]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -22,10 +41,26 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody
   const [muted, setMuted] = useState(false);
   const [showSafeZone, setShowSafeZone] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  // T11：预览 / 成片切换
+  const [viewMode, setViewMode] = useState<'preview' | 'final'>('preview');
 
   const timeRef = useRef(0);
   const lastFrameTsRef = useRef<number | null>(null);
   const playedEventIdxRef = useRef(0);
+
+  // T11：预览用的强度/特效派生（不参与 sim_hash）
+  const arcCfg = useMemo(() => resolveArcConfig(spec), [spec]);
+  const fxCfg = useMemo(() => resolveFxConfig(spec), [spec]);
+  const palette = spec.scene.style.palette.colors;
+
+  /** 预览粒子池（最多 30 个） */
+  const particlesRef = useRef<Array<{
+    x: number; y: number; vx: number; vy: number; t0: number; life: number; r: number; color: string;
+  }>>([]);
+  /** 预览涟漪池 */
+  const ripplesRef = useRef<Array<{ x: number; y: number; t0: number; color: string; strength: number }>>([]);
+  /** 上一帧时间，用于判断是否回绕（回绕时清空拖尾痕迹） */
+  const lastTRef = useRef(-1);
 
   const playNote = (midi: number, intensity: number) => {
     if (muted) return;
@@ -69,12 +104,46 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody
     const h = canvas.height;
     const bgColors = spec.scene.style.background?.colors ?? ['#05060F', '#101437'];
 
-    // Background
+    // ---- T11：强度曲线（与 T5 同一公式，只影响视觉表现） ----
+    const I = arcIntensity(arcCfg, tSec, sim.duration_sec);
+    const hp = hookPeekFactor(arcCfg, tSec, sim.duration_sec);
+    const effI = Math.min(1, I + 0.25 * hp);
+    const zoom = zoomMult(effI) * (1 + 0.08 * hp);
+    const bgMult = bgBrightnessMult(effI) * (1 + 0.15 * hp);
+
+    // ---- 拖尾：用半透明底色覆盖上一帧，而不是清屏 ----
+    // 透明度 = 1 - trail.fade（fade 越大，痕迹越淡）
+    const trailCfg = spec.scene.style.trail;
+    const trailFade = trailCfg?.fade && trailCfg.fade > 0 ? trailCfg.fade : 0.85;
+    const coverAlpha = Math.max(0.08, Math.min(1, 1 - trailFade));
+    const rewound = tSec < lastTRef.current - 0.05 || lastTRef.current < 0;
+    lastTRef.current = tSec;
+
     const grad = ctx.createLinearGradient(0, 0, 0, h);
     grad.addColorStop(0, bgColors[0] ?? '#05060F');
     grad.addColorStop(1, bgColors[1] ?? bgColors[0] ?? '#101437');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, w, h);
+
+    if (!trailCfg?.enabled || rewound) {
+      // 无拖尾或时间回绕：整屏重绘背景
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 1;
+    } else {
+      // 有拖尾：只盖一层半透明背景色，保留上一帧的痕迹
+      ctx.globalAlpha = coverAlpha;
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 1;
+    }
+
+    // 背景亮度随强度变化：叠一层半透明黑/白
+    if (bgMult !== 1) {
+      ctx.globalAlpha = Math.min(0.5, Math.abs(bgMult - 1));
+      ctx.fillStyle = bgMult > 1 ? '#FFFFFF' : '#000000';
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 1;
+    }
 
     // Subtle grid if configured
     if (spec.scene.style.background?.type === 'grid') {
@@ -277,19 +346,97 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody
         ctx.restore();
       }
 
-      // Draw balls (melody-bounce & ball-sort)
+      // ---- T11：球的发光 + 碰撞粒子/涟漪 ----
+      const ringShift = zoom - 1;   // 缩放对位置的微调（以画面中心为基准）
       for (const b of snap.balls) {
-        const bx = b.x * w;
-        const by = spec.scene.template === 'ball-sort' ? b.y * h : h * 0.5 + (b.y - 0.5) * w;
-        const br = Math.max(3, b.r * w);
+        const baseX = b.x * w;
+        const baseY = spec.scene.template === 'ball-sort' ? b.y * h : h * 0.5 + (b.y - 0.5) * w;
+        const bx = w * 0.5 + (baseX - w * 0.5) * zoom;
+        const by = h * 0.5 + (baseY - h * 0.5) * zoom;
+        const br = Math.max(3, b.r * w) * (1 + 0.06 * effI);
+
+        // 发光：shadowBlur = 球半径 × 2.5，shadowColor = 球色
+        ctx.save();
+        ctx.shadowColor = b.color;
+        ctx.shadowBlur = br * 2.5;
         ctx.beginPath();
         ctx.arc(bx, by, br, 0, Math.PI * 2);
         ctx.fillStyle = b.color;
         ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        // 再叠一层，让光晕更明显
+        ctx.fill();
+        ctx.restore();
+
+        // 亮核
+        ctx.beginPath();
+        ctx.arc(bx, by, br * 0.55, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        ctx.fill();
+
+        // 撞墙时生成涟漪与粒子（用事件时间对齐，保证确定性观感）
+        if (!fxCfg.disabled) {
+          for (const ev of sim.events) {
+            if (Math.abs(ev.t - tSec) > 0.05) continue;
+            if (ev.type === 'wall_bounce' || ev.type === 'bin_drop' || ev.type === 'ring_pass') {
+              const ex = w * 0.5 + (ev.x * w - w * 0.5) * zoom;
+              const ey = h * 0.5 + (ev.y * h - h * 0.5) * zoom;
+              const strength = ev.intensity * Math.max(0.2, fxCfg.ripple);
+              if (ripplesRef.current.length < 12) {
+                ripplesRef.current.push({ x: ex, y: ey, t0: tSec, color: ev.color ?? b.color, strength });
+              }
+              const n = Math.round(3 * particleMult(effI) * fxCfg.particles * ev.intensity);
+              for (let k = 0; k < n && particlesRef.current.length < 30; k++) {
+                const ang = (k / Math.max(1, n)) * Math.PI * 2 + tSec;
+                const sp = (0.6 + Math.random() * 0.9) * br * 4;
+                particlesRef.current.push({
+                  x: ex, y: ey,
+                  vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+                  t0: tSec, life: 0.45, r: Math.max(1.2, br * 0.28),
+                  color: ev.color ?? b.color,
+                });
+              }
+            }
+          }
+        }
       }
+      void ringShift;
+    }
+
+    // ---- T11：绘制涟漪 ----
+    ripplesRef.current = ripplesRef.current.filter((r) => tSec - r.t0 < 0.5 && tSec >= r.t0);
+    for (const r of ripplesRef.current) {
+      const age = (tSec - r.t0) / 0.5;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, w * 0.02 + age * w * 0.09, 0, Math.PI * 2);
+      ctx.strokeStyle = r.color;
+      ctx.globalAlpha = (1 - age) * 0.55 * r.strength;
+      ctx.lineWidth = 2.5 * (1 - age) + 0.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- T11：绘制粒子（最多 30 个） ----
+    particlesRef.current = particlesRef.current.filter((p) => tSec - p.t0 < p.life && tSec >= p.t0);
+    if (particlesRef.current.length > 30) particlesRef.current = particlesRef.current.slice(-30);
+    for (const p of particlesRef.current) {
+      const age = (tSec - p.t0) / p.life;
+      const px = p.x + p.vx * (tSec - p.t0);
+      const py = p.y + p.vy * (tSec - p.t0) + 60 * (tSec - p.t0) ** 2;
+      ctx.globalAlpha = Math.max(0, 1 - age);
+      ctx.beginPath();
+      ctx.arc(px, py, p.r * (1 - 0.4 * age), 0, Math.PI * 2);
+      ctx.fillStyle = p.color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- T11：暗角（径向渐变叠加） ----
+    if (fxCfg.vignette > 0) {
+      const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.30, w / 2, h / 2, Math.max(w, h) * 0.72);
+      vg.addColorStop(0, 'rgba(0,0,0,0)');
+      vg.addColorStop(1, `rgba(0,0,0,${(0.55 * fxCfg.vignette).toFixed(3)})`);
+      ctx.fillStyle = vg;
+      ctx.fillRect(0, 0, w, h);
     }
 
     // Timeline text overlays (Shorts UI safe zones)
@@ -298,14 +445,37 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody
       const startT = item.t < 0 ? sim.duration_sec + item.t : item.t;
       const endT = startT + item.dur;
       if (tSec >= startT && tSec <= endT) {
+        const yPos = item.position === 'top-safe' ? h * 0.16 : item.position === 'bottom-safe' ? h * 0.76 : h * 0.5;
+
+        // T11：钩子文字的弹出缩放动画（参数与 T6 一致）
+        // hook 在 0.15s 内出现，0→0.22s 从 0.72 倍弹到 1.06 倍再回落到 1.0
+        let scale = 1;
+        let alpha = 1;
+        if (item.role === 'hook') {
+          const age = tSec - startT;
+          if (age < 0.22) {
+            const k = Math.max(0, age) / 0.22;
+            scale = 0.72 + 0.34 * Math.sin(k * Math.PI * 0.85);
+            alpha = Math.min(1, k * 4);
+          } else if (age < 0.30) {
+            scale = 1.06 - 0.06 * ((age - 0.22) / 0.08);
+          }
+          const fadeOutStart = endT - 0.25;
+          if (tSec > fadeOutStart) alpha = Math.max(0, (endT - tSec) / 0.25);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.translate(w / 2, yPos);
+        ctx.scale(scale, scale);
         ctx.fillStyle = '#FFFFFF';
         ctx.textAlign = 'center';
         ctx.font = item.role === 'hook' ? '700 19px "Plus Jakarta Sans", sans-serif' : '600 13px "DM Sans", sans-serif';
-        const yPos = item.position === 'top-safe' ? h * 0.16 : item.position === 'bottom-safe' ? h * 0.76 : h * 0.5;
         ctx.shadowColor = 'rgba(0,0,0,0.85)';
         ctx.shadowBlur = 8;
-        ctx.fillText(item.text, w / 2, yPos, w - 48);
+        ctx.fillText(item.text, 0, 0, w - 48);
         ctx.shadowBlur = 0;
+        ctx.restore();
       }
     }
 
@@ -428,17 +598,48 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody
         }`}
         style={{ aspectRatio: '9 / 16' }}
       >
-        <canvas
-          ref={canvasRef}
-          width={324}
-          height={576}
-          data-testid="simulation-canvas"
-          className="h-full w-full block"
-        />
-        <div className="absolute bottom-2 right-2 rounded bg-slate-950/80 px-2 py-0.5 font-mono text-[11px] text-slate-200 tabular-nums">
-          {currentTime.toFixed(1)}s / {sim.duration_sec}s
-        </div>
+        {viewMode === 'final' && renderId ? (
+          <video
+            src={`/api/renders/${encodeURIComponent(renderId)}/mp4`}
+            controls
+            autoPlay={false}
+            loop={spec.format.loop.enabled}
+            muted={muted}
+            playsInline
+            data-testid="final-video"
+            className="h-full w-full block bg-black object-contain"
+          />
+        ) : (
+          <>
+            <canvas
+              ref={canvasRef}
+              width={324}
+              height={576}
+              data-testid="simulation-canvas"
+              className="h-full w-full block"
+            />
+            <div className="absolute bottom-2 right-2 rounded bg-slate-950/80 px-2 py-0.5 font-mono text-[11px] text-slate-200 tabular-nums">
+              {currentTime.toFixed(1)}s / {sim.duration_sec}s
+            </div>
+          </>
+        )}
+
+        {renderCompleted && renderId ? (
+          <button
+            type="button"
+            onClick={() => setViewMode((m) => (m === 'final' ? 'preview' : 'final'))}
+            className="absolute left-2 top-2 flex items-center gap-1 rounded bg-slate-950/80 px-2 py-1 text-[11px] font-medium text-slate-100 hover:bg-slate-800"
+            data-testid="toggle-final"
+          >
+            <Film size={12} />
+            {viewMode === 'final' ? '看预览' : '看成片'}
+          </button>
+        ) : null}
       </div>
+
+      <p className="mx-auto w-full max-w-[300px] text-center text-[11px] leading-snug text-slate-500">
+        预览为近似效果，最终画面以渲染出的 MP4 为准。
+      </p>
 
       <div className="mx-auto flex w-full max-w-[300px] flex-col gap-2">
         <input

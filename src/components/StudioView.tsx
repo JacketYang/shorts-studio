@@ -302,7 +302,12 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
                 </div>
               </div>
 
-              <SimulationPlayer spec={selectedSpec.spec} melody={melodyResolved} />
+              <SimulationPlayer
+                spec={selectedSpec.spec}
+                melody={melodyResolved}
+                renderId={selectedRender?.id ?? null}
+                renderCompleted={selectedRender?.status === 'completed'}
+              />
             </div>
           ) : (
             <div className="py-24 text-center text-sm text-slate-500">请选择左侧一条渲染任务以预览物理音频仿真。</div>

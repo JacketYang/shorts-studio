@@ -751,3 +751,122 @@ export function runDeterministicSimulation(
     hook_audio_onset_sec: hookAudioOnset,
   };
 }
+
+// ---------------------------------------------------------------------------
+// T11：预览用的强度/特效参数（只读派生，不参与 sim_hash）
+//
+// 这些函数与 workers/render/arc.py、fx.py 的同名公式保持一致，
+// 但**绝不修改** runDeterministicSimulation 的任何输出。
+// ---------------------------------------------------------------------------
+
+function smoothstep(x: number): number {
+  const t = Math.max(0, Math.min(1, x));
+  return t * t * (3 - 2 * t);
+}
+
+/** 与 arc.py 的 parse_arc 默认值一致。 */
+export interface ArcConfig {
+  preset: 'ramp' | 'tease-then-build' | 'wave' | 'countdown' | 'drop';
+  climaxAt: number;
+  hookPeek: boolean;
+}
+
+export function resolveArcConfig(spec: VideoSpec): ArcConfig {
+  const a = spec.scene.arc ?? {};
+  return {
+    preset: a.preset ?? 'ramp',
+    climaxAt: Math.max(0.5, Math.min(0.95, a.climax_at ?? 0.85)),
+    hookPeek: a.hook_peek !== false,
+  };
+}
+
+/**
+ * 强度曲线 I(t) ∈ [0,1]，与 workers/render/arc.py 的 intensity_of 同一套公式。
+ * t 归一化为 u = t / duration。
+ */
+export function arcIntensity(cfg: ArcConfig, t: number, duration: number): number {
+  const d = Math.max(0.01, duration);
+  const u = Math.max(0, Math.min(1, t / d));
+  const c = cfg.climaxAt;
+  switch (cfg.preset) {
+    case 'ramp':
+      return u;
+    case 'tease-then-build':
+      return u < c ? 0.25 * smoothstep(u / Math.max(0.01, c)) : 0.25 + 0.75 * smoothstep((u - c) / Math.max(0.01, 1 - c));
+    case 'wave':
+      return 0.5 + 0.5 * Math.sin(u * Math.PI * 2 - Math.PI / 2);
+    case 'countdown': {
+      const seg = 4;
+      const local = (u * seg) % 1;
+      return Math.min(1, smoothstep(local) * 0.6 + u * 0.4);
+    }
+    case 'drop': {
+      const silenceEnd = Math.max(0, c - 0.18);
+      const burst = c;
+      if (u < silenceEnd) return 0.35 * smoothstep(u / Math.max(0.01, silenceEnd));
+      if (u < burst) return 0.15;
+      return 0.15 + 0.85 * smoothstep((u - burst) / Math.max(0.01, 1 - burst));
+    }
+    default:
+      return u;
+  }
+}
+
+/** hook_peek：开头 0→1→0 的小高潮（与 arc.py 一致）。 */
+export function hookPeekFactor(cfg: ArcConfig, t: number, duration: number): number {
+  if (!cfg.hookPeek) return 0;
+  const window = Math.min(2.2, duration * 0.18);
+  if (t >= window) return 0;
+  const k = t / Math.max(0.01, window);
+  return Math.sin(k * Math.PI);
+}
+
+/** T3/T4 的 fx 预设表，与 fx.py 的 FX_LEVELS 一致。 */
+const FX_LEVELS: Record<number, { flash: number; ripple: number; particles: number; shake: number; pop: number; vignette: number }> = {
+  0: { flash: 0, ripple: 0, particles: 0, shake: 0, pop: 0, vignette: 0 },
+  1: { flash: 0.4, ripple: 0.5, particles: 0.4, shake: 0, pop: 0.5, vignette: 0.3 },
+  2: { flash: 0.7, ripple: 0.8, particles: 0.7, shake: 0.5, pop: 0.8, vignette: 0.5 },
+  3: { flash: 1, ripple: 1, particles: 1, shake: 1, pop: 1, vignette: 0.7 },
+};
+
+export interface FxConfig {
+  flash: number;
+  ripple: number;
+  particles: number;
+  shake: number;
+  pop: number;
+  vignette: number;
+  disabled: boolean;
+}
+
+/** 解析 scene.style.fx；level 为预设，显式字段覆盖。 */
+export function resolveFxConfig(spec: VideoSpec): FxConfig {
+  const raw = spec.scene.style?.fx ?? {};
+  const level = Math.max(0, Math.min(3, raw.level ?? 2));
+  const base = FX_LEVELS[level] ?? FX_LEVELS[2];
+  const pick = (v: number | undefined, d: number) => (typeof v === 'number' ? Math.max(0, Math.min(1, v)) : d);
+  const cfg = {
+    flash: pick(raw.flash, base.flash),
+    ripple: pick(raw.ripple, base.ripple),
+    particles: pick(raw.particles, base.particles),
+    shake: pick(raw.shake, base.shake),
+    pop: pick(raw.pop, base.pop),
+    vignette: pick(raw.vignette, base.vignette),
+  };
+  return { ...cfg, disabled: level === 0 && cfg.flash + cfg.ripple + cfg.particles + cfg.shake + cfg.pop + cfg.vignette === 0 };
+}
+
+/** 粒子数量倍率（与 arc.particle_mult 一致）。 */
+export function particleMult(i: number): number {
+  return 0.6 + 0.8 * i;
+}
+
+/** 缩放倍率（与 arc.zoom_mult 一致）。 */
+export function zoomMult(i: number): number {
+  return 1.0 + 0.08 * i;
+}
+
+/** 背景亮度倍率（与 arc.bg_brightness_mult 一致）。 */
+export function bgBrightnessMult(i: number): number {
+  return 0.9 + 0.2 * i;
+}
