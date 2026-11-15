@@ -149,6 +149,8 @@ export const FIXTURE_MELODY_BOUNCE: VideoSpec = {
     series: { slug: 'name-that-tune', episode: 1, title: 'Name That Tune' },
     novelty_notes:
       'First episode of the series: hexagon arena with split-on-bounce; previous melody videos used a circle arena with growth rule.',
+    twist:
+      'Halfway through, the melody goes silent for one second and the balls slam back together — then everything splits at once.',
   },
   format: {
     aspect: '9:16',
@@ -167,8 +169,10 @@ export const FIXTURE_MELODY_BOUNCE: VideoSpec = {
       background: { type: 'gradient', colors: ['#05060F', '#101437'] },
       trail: { enabled: true, length_frames: 18, fade: 0.85 },
       camera: { zoom_from: 1.0, zoom_to: 1.15, shake: 0.0 },
+      fx: { level: 3, vignette: 0.5 },
     },
     arc: { preset: 'ramp', climax_at: 0.86, hook_peek: true },
+    hud: { counter: 'balls', label: 'BALLS', position: 'bottom-safe' },
     params: {
       arena: { shape: 'hexagon', size: 0.78, wall_thickness: 0.012, rotation_deg_per_s: 6 },
       balls: { count_start: 1, radius: 0.028, speed: 0.55, restitution: 1.0, gravity: 0.0, max_count: 64 },
@@ -253,6 +257,8 @@ export const FIXTURE_BALL_SORT: VideoSpec = {
     series: null,
     novelty_notes:
       'Uses funnel + moving color-filter gate instead of static spiral chute; paired with procedural pentatonic scale.',
+    twist:
+      'The last bin fills in a single avalanche when the gate opens, dumping 12 balls in under a second.',
   },
   format: {
     aspect: '9:16',
@@ -271,8 +277,10 @@ export const FIXTURE_BALL_SORT: VideoSpec = {
       background: { type: 'grid', colors: ['#0B1020', '#162038'] },
       trail: { enabled: true, length_frames: 10, fade: 0.78 },
       camera: { zoom_from: 1.0, zoom_to: 1.04, shake: 0.0 },
+      fx: { level: 2, vignette: 0.45 },
     },
     arc: { preset: 'tease-then-build', climax_at: 0.88, hook_peek: true },
+    hud: { counter: 'bins_filled', label: 'BINS', position: 'bottom-safe' },
     params: {
       balls: { count: 24, colors: ['#FF595E', '#FFCA3A', '#8AC926', '#1982C4'] },
       bins: { count: 4, layout: 'under-funnel' },
@@ -364,6 +372,8 @@ export const FIXTURE_PENDULUM_WAVE: VideoSpec = {
     series: { slug: 'harmonic-waves', episode: 1, title: 'Harmonic Waves' },
     novelty_notes:
       'Introduces pendulum-wave harmonic sweep mechanic with center-crossing chime triggers instead of bouncing balls.',
+    twist:
+      'All 15 bobs snap into a single flat line for one beat, then fan back out in reverse order.',
   },
   format: {
     aspect: '9:16',
@@ -381,8 +391,10 @@ export const FIXTURE_PENDULUM_WAVE: VideoSpec = {
       palette: { family: 'cool', colors: ['#38BDF8', '#818CF8', '#2DD4BF', '#C084FC'] },
       background: { type: 'gradient', colors: ['#040814', '#0F172A'] },
       trail: { enabled: true, length_frames: 14, fade: 0.8 },
+      fx: { level: 2, vignette: 0.45 },
     },
     arc: { preset: 'wave', climax_at: 0.82, hook_peek: true },
+    hud: { counter: 'notes', label: 'NOTES', position: 'bottom-safe' },
     params: {
       pendulum: { count: 15, length_min: 0.24, length_step: 0.022, max_angle_deg: 52, damping: 0.0 },
       rule: { type: 'harmonic_sweep', cycle_sec: 24 },
@@ -464,6 +476,8 @@ export const FIXTURE_ORBIT_SYNC: VideoSpec = {
     series: null,
     novelty_notes:
       'Concentric orbit-sync mechanic with beam-crossing polyrhythm triggers instead of polygon bounce or sorting.',
+    twist:
+      'Every planet freezes mid-orbit for a beat, then all ten cross the beam at the exact same instant.',
   },
   format: {
     aspect: '9:16',
@@ -481,8 +495,10 @@ export const FIXTURE_ORBIT_SYNC: VideoSpec = {
       palette: { family: 'pastel', colors: ['#F472B6', '#FB923C', '#FACC15', '#34D399', '#38BDF8'] },
       background: { type: 'solid', colors: ['#060714'] },
       trail: { enabled: true, length_frames: 20, fade: 0.85 },
+      fx: { level: 3, vignette: 0.5 },
     },
     arc: { preset: 'drop', climax_at: 0.85, hook_peek: true },
+    hud: { counter: 'notes', label: 'NOTES', position: 'bottom-safe' },
     params: {
       orbits: { count: 10, base_radius: 0.11, radius_step: 0.032, base_omega: 1.05, resonance_ratio: 0.14 },
       rule: { type: 'harmonic_align', trigger_angle_deg: -90 },
@@ -564,6 +580,8 @@ export const FIXTURE_RINGS_ESCAPE: VideoSpec = {
     series: null,
     novelty_notes:
       'Concentric counter-rotating rings with narrow gaps; each escape removes a ring and respawns an outer one.',
+    twist:
+      'The sixth ring never opens — the ball has to ricochet off the walls until the gap finally swings around.',
   },
   format: {
     aspect: '9:16',
@@ -581,8 +599,10 @@ export const FIXTURE_RINGS_ESCAPE: VideoSpec = {
       palette: { family: 'cool', colors: ['#38BDF8', '#A78BFA', '#F472B6', '#FBBF24'] },
       background: { type: 'gradient', colors: ['#04060F', '#0B1230'] },
       trail: { enabled: true, length_frames: 16, fade: 0.84 },
+      fx: { level: 3, vignette: 0.5 },
     },
     arc: { preset: 'tease-then-build', climax_at: 0.86, hook_peek: true },
+    hud: { counter: 'notes', label: 'ESCAPED', position: 'bottom-safe' },
     params: {
       rings: { count: 6, base_radius: 0.16, radius_step: 0.045, gap_deg: 40, rotation_deg_per_s: 24 },
       balls: { count: 1, radius: 0.02, gravity: 0.25, restitution: 0.95 },

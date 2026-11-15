@@ -45,6 +45,8 @@ export interface VideoSpec {
       title: string;
     } | null;
     novelty_notes: string;
+    /** T12：出人意料的那一刻；旧 Spec 可缺省 */
+    twist?: string;
   };
   format: {
     aspect: '9:16' | '1:1';

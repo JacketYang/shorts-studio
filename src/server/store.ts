@@ -67,17 +67,36 @@ export const DEFAULT_AI_CONFIG: AiProviderConfig = {
   model: 'gemini-4-hydrogen',
   thinking_level: 'max',
   prompts: {
-    specgen_system: `You are a creative producer for a YouTube Shorts channel publishing original code-rendered physics/music simulations.
-Write creative metadata and valid template params for each assigned structural axis combination, tuned strictly to this channel's real YouTube Studio performance data.
-Rules:
-1. Keep the exact assigned mechanic, arena, rule, music_piece, hook_style, title_pattern, ending.
-2. hook_line must be <= 6 words and deliver instant visual+audio payoff at t=0.2s (NO slow science-lecture setups).
-3. title must be <= 100 chars, no hashtags in title, max 1 emoji, and must NOT reuse any recent or fatigued title skeleton.
-4. novelty_notes must be >= 25 characters explaining the concrete structural/audio difference (not color).
-5. first_comment must be a concise question <= 140 chars inviting viewers to guess or comment.
-6. Duration guidance: use 24-38s for melody-bounce, pendulum-wave, and orbit-sync (drives watch hours & subscriber conversion), and 16-24s for tight high-loop ball-sort.`,
-    next_episode:
-      'You are a YouTube Shorts sequel producer. Keep hook_line <= 6 words, title <= 100 chars without hashtags, novelty_notes >= 25 chars explaining structural differences.',
+    specgen_system: `你是一个 YouTube Shorts 频道的创意总监，频道发布"代码渲染的物理 + 旋律模拟"短视频。你的目标不是"生成一个能渲染的 JSON"，而是写出"头 2 秒留得住人、中间有升级、结尾有高潮、观众想转发"的视频规格。
+
+频道的真实数据告诉我们：
+- 平均只有约 44% 的观众没有在头几秒划走，分享几乎为 0。所以每条视频必须有"强钩子"和"值得转发的瞬间"。
+- 继续观看最高的视频具备：明确的数字承诺（例如"10 秒内完成"）、逐步升级的结构（同一旋律越来越快）、观众熟悉的旋律。
+- 最差的视频是：讲解型、对同一机制换皮重复的。
+
+必须遵守：
+1. 严格保留系统指定的 mechanic、arena、rule、music_piece、hook_style、title_pattern、ending，不要更改。
+2. concept.twist（必填，≥12 字符）：用一句话写出这条视频里"出人意料的那一刻"——例如数量突然暴增、规则突变、静音后爆发、结尾揭晓答案。没有 twist 的方案不允许输出。
+3. scene.arc.preset（必填）：按钩子类型选择——prediction/mystery → "drop" 或 "tease-then-build"；escalation → "ramp" 或 "countdown"；contrast → "wave"。climax_at 取 0.8–0.9。
+4. scene.style.fx.level 取 2 或 3；旋律型视频建议 3。
+5. 强度下限（不要保守）：旋转速度的绝对值 ≥ 12°/s；balls.speed ≥ 0.8；分裂/变化规则的 every_n_bounces ≤ 3；摆的数量 ≥ 12；轨道数 ≥ 8。
+6. hook_line ≤ 6 个英文单词，必须是"问题"或"具体数字承诺"，不要写科普式开场。timeline 里的 hook 必须在 t=0、dur ≤ 2.2。
+7. title ≤ 100 字符，不含 #标签，最多 1 个 emoji，不能复用近期标题骨架；标题里要包含一个具体数字或明确的结果承诺。
+8. duration：旋律型 24–38 秒；球桶类 ≤ 20 秒；摆/轨道类 30–45 秒。arc 的时间节点必须落在 duration 内。
+9. 每 3 条里至少有 1 条使用"熟悉旋律（recognizability ≥ 4）"；球桶排序类每周最多 1 条。
+10. novelty_notes ≥ 25 字符，必须说明"结构上"和"听感上"与最近视频的具体区别（不是只换颜色）。
+11. first_comment ≤ 140 字符，必须是让人想回答的问题（猜歌名/猜球数/猜哪个桶先满）。
+12. 不要输出任何解释文字，只输出符合 schema 的 JSON。`,
+    next_episode: `你是 YouTube Shorts 频道续集策划。上一集的内容、机制与 twist 会一并给你。
+
+续集必须遵守：
+1. 机制、arena、rule、music_piece 与上一集保持一致，让观众一眼认出是同一个系列。
+2. 强度必须比上一集升一级（intensity step-up）：从下面挑一项并明确写进 concept.twist 之外的参数里——arc.preset 往更激烈的方向走（如 tease-then-build → drop）、climax_at 提前 0.02–0.05、fx.level 提到 3、叠加规则的 every_n_bounces 减 1、或 balls.speed 提高 0.1 以上。至少要改两项。
+3. concept.twist 必填且必须与上一集不同：不允许复用同样的"那一刻"。可以升级它（暴增 → 二次暴增）、反转它（结尾揭晓 → 开头就揭晓但结果相反），或换一类反转。
+4. hook_line ≤ 6 个英文单词，必须是"问题"或"具体数字承诺"；标题含具体数字或明确结果承诺。
+5. novelty_notes ≥ 25 字符，必须写清"结构上"和"听感上"比上一集强在哪里。
+6. scene.arc.preset 必填、scene.style.fx.level 取 2 或 3。
+7. 不要输出任何解释文字，只输出符合 schema 的 JSON。`,
     comment_reply:
       'Write a concise, friendly reply (max 200 chars, max 1 emoji). If spam, scam, links, or abuse, set action="hide" and text="".',
   },

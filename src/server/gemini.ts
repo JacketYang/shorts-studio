@@ -191,6 +191,9 @@ function buildSpecFromCreativeDraft(params: {
       novelty_notes: String(
         item.novelty_notes || `New combination: ${combo.mechanic} in ${combo.arena} with ${combo.rule} and ${combo.music_piece}`
       ),
+      // T12：模型必须给出 twist；缺失时用一个兜底值而不是留空，
+      // 否则这条 spec 会直接被 W106/W107 之外的校验拦下
+      twist: String(item.twist || '').trim() || `${combo.rule} flips the whole set at the drop`,
     },
     format: {
       aspect: '9:16',
@@ -211,6 +214,30 @@ function buildSpecFromCreativeDraft(params: {
         },
         background: { type: 'gradient', colors: ['#05060F', '#101437'] },
         trail: { enabled: true, length_frames: 16, fade: 0.85 },
+        // T12：fx.level 限定 2 或 3（模型给别的值时向下夹到 2）
+        fx: { level: (Number(item.fx_level) >= 3 ? 3 : 2) as 2 | 3 },
+      },
+      // T12：arc 必填，climax_at 夹到 0.8–0.9
+      arc: {
+        preset: (() => {
+          const allowed = ['ramp', 'tease-then-build', 'wave', 'countdown', 'drop'] as const;
+          const raw = String(item.arc_preset || '');
+          return (allowed as readonly string[]).includes(raw) ? (raw as typeof allowed[number]) : 'ramp';
+        })(),
+        climax_at: Math.min(0.9, Math.max(0.8, Number(item.arc_climax_at) || 0.86)),
+        hook_peek: true,
+      },
+      // T12：hud 计数器
+      hud: {
+        counter: (() => {
+          const allowed = ['none', 'balls', 'notes', 'bounces', 'bins_filled'] as const;
+          const raw = String(item.hud_counter || 'notes');
+          return (allowed as readonly string[]).includes(raw)
+            ? (raw as typeof allowed[number])
+            : (combo.mechanic === 'ball-sort' ? 'bins_filled' : 'notes');
+        })(),
+        label: String(item.hud_label || (combo.mechanic === 'ball-sort' ? 'BINS' : 'NOTES')).slice(0, 24),
+        position: 'bottom-safe' as const,
       },
       params: paramsObj,
     },
@@ -332,6 +359,8 @@ Return JSON array of ${combos.length} creative specs matching fields: working_ti
           payoff: { type: Type.STRING },
           emotion: { type: Type.STRING },
           novelty_notes: { type: Type.STRING },
+          // T12：必填的"出人意料的那一刻"
+          twist: { type: Type.STRING, description: '>=12 chars: the one unexpected beat in this video' },
           duration_sec: { type: Type.NUMBER },
           title: { type: Type.STRING },
           description: { type: Type.STRING },
@@ -339,8 +368,26 @@ Return JSON array of ${combos.length} creative specs matching fields: working_ti
           series_slug: { type: Type.STRING },
           series_episode: { type: Type.INTEGER },
           series_title: { type: Type.STRING },
+          // T12：强度曲线与特效档位（必填）
+          arc_preset: {
+            type: Type.STRING,
+            enum: ['ramp', 'tease-then-build', 'wave', 'countdown', 'drop'],
+            description: 'Intensity curve preset; pick by hook_style',
+          },
+          arc_climax_at: { type: Type.NUMBER, description: '0.80-0.90' },
+          fx_level: { type: Type.INTEGER, enum: [2, 3], description: '2 or 3 only' },
+          hud_counter: {
+            type: Type.STRING,
+            enum: ['none', 'balls', 'notes', 'bounces', 'bins_filled'],
+            description: 'Live counter shown in the safe zone',
+          },
+          hud_label: { type: Type.STRING, description: '<=24 chars, e.g. BALLS' },
         },
-        required: ['working_title', 'hook_line', 'payoff', 'novelty_notes', 'duration_sec', 'title', 'description', 'first_comment'],
+        required: [
+          'working_title', 'hook_line', 'payoff', 'novelty_notes', 'twist',
+          'duration_sec', 'title', 'description', 'first_comment',
+          'arc_preset', 'arc_climax_at', 'fx_level',
+        ],
       },
     },
   });
@@ -378,6 +425,8 @@ export async function generateNextEpisodeSpecsWithGemini(params: {
   remoteVideos?: RemoteVideo[];
   sourceTitle: string;
   sourceMetricsSummary: string;
+  /** T12：上一集的 twist，续集必须换一个 */
+  sourceTwist?: string | null;
   currentMonthSpendUsd: number;
   aiConfig?: AiProviderConfig;
 }): Promise<{
@@ -401,9 +450,11 @@ export async function generateNextEpisodeSpecsWithGemini(params: {
 
   const prompt = `Source breakout video: "${params.sourceTitle}" (${params.sourceMetricsSummary})
 Fatigued title openers to AVOID: ${JSON.stringify(guidance.fatiguedOpeners)}
-Task: Produce 3 NEW sequel episode drafts in the same spirit while changing at least 2 axes (never reuse the exact source title skeleton or same melody within 14d).
+Previous episode twist to BEAT (must differ): ${JSON.stringify(params.sourceTwist ?? null)}
+Task: Produce 3 NEW sequel drafts. Keep the same mechanic/arena/rule/music_piece so it reads as one series, but escalate intensity one step beyond the source (raise fx_level, move arc_preset toward a harder curve, pull arc_climax_at earlier, tighten every_n_bounces, or raise balls.speed — change at least two).
+Every item MUST include a fresh twist that is NOT the same beat as the previous episode.
 Assigned combinations (3): ${JSON.stringify(combos)}
-Return JSON array of 3 items with fields: working_title, hook_line, payoff, novelty_notes, duration_sec, title, description, first_comment.`;
+Return JSON array of 3 items with fields: working_title, hook_line, payoff, novelty_notes, twist, duration_sec, title, description, first_comment, arc_preset, arc_climax_at, fx_level, hud_counter, hud_label.`;
 
   const aiResult = await callStructuredAi({
     aiConfig: cfg,
@@ -419,12 +470,28 @@ Return JSON array of 3 items with fields: working_title, hook_line, payoff, nove
           hook_line: { type: Type.STRING },
           payoff: { type: Type.STRING },
           novelty_notes: { type: Type.STRING },
+          twist: { type: Type.STRING, description: '>=12 chars, must differ from the previous episode' },
           duration_sec: { type: Type.NUMBER },
           title: { type: Type.STRING },
           description: { type: Type.STRING },
           first_comment: { type: Type.STRING },
+          arc_preset: {
+            type: Type.STRING,
+            enum: ['ramp', 'tease-then-build', 'wave', 'countdown', 'drop'],
+          },
+          arc_climax_at: { type: Type.NUMBER, description: '0.80-0.90' },
+          fx_level: { type: Type.INTEGER, enum: [2, 3] },
+          hud_counter: {
+            type: Type.STRING,
+            enum: ['none', 'balls', 'notes', 'bounces', 'bins_filled'],
+          },
+          hud_label: { type: Type.STRING },
         },
-        required: ['working_title', 'hook_line', 'payoff', 'novelty_notes', 'duration_sec', 'title', 'description', 'first_comment'],
+        required: [
+          'working_title', 'hook_line', 'payoff', 'novelty_notes', 'twist',
+          'duration_sec', 'title', 'description', 'first_comment',
+          'arc_preset', 'arc_climax_at', 'fx_level',
+        ],
       },
     },
   });

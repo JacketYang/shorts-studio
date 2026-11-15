@@ -81,6 +81,8 @@ export const VideoSpecSchema = z.object({
       })
       .nullable(),
     novelty_notes: z.string().min(20, 'novelty_notes 至少 20 个字符，需说明实质差异'),
+    /** T12：出人意料的那一刻；缺失视为旧 Spec（只告警不报错） */
+    twist: z.string().min(12, 'twist 至少 12 个字符').optional(),
   }),
   format: z.object({
     aspect: z.enum(['9:16', '1:1']),
@@ -627,6 +629,63 @@ export function validateImportPayload(
         level: 'warn',
         message: '系列内 novelty_notes 过于笼统，仅换配色不算实质差异',
       });
+    }
+
+    // T12：W106 未设置 scene.arc
+    if (!spec.scene.arc || !spec.scene.arc.preset) {
+      issues.push({
+        index: i,
+        spec_key: spec.spec_key,
+        path: `${prefix}scene.arc`,
+        code: 'W106',
+        level: 'warn',
+        message: '未设置 scene.arc：缺少强度曲线，成片会平淡、头 2 秒留不住人',
+      });
+    }
+
+    // T12：W107 fx.level < 2
+    {
+      const lvl = spec.scene.style?.fx?.level;
+      if (typeof lvl !== 'number' || lvl < 2) {
+        issues.push({
+          index: i,
+          spec_key: spec.spec_key,
+          path: `${prefix}scene.style.fx.level`,
+          code: 'W107',
+          level: 'warn',
+          message: `fx.level 为 ${typeof lvl === 'number' ? lvl : '未设置'}（建议 2 或 3）：特效偏弱，观众划走率高`,
+        });
+      }
+    }
+
+    // T12：W108 duration 与 arc 不匹配
+    //
+    // 只判断"arc 的时间安排在这条 duration 下是否自洽"，不对模板时长做硬性规定
+    // ——那是 specgen 提示词的写作建议，不是合法性条件：
+    //   高潮必须有足够尾韵：距结尾至少 0.8 秒（duration 下限已被 schema 限到 8 秒，
+    //   所以"时长过短"不可能发生，这里只查尾韵）
+    {
+      const arc = spec.scene.arc;
+      const dur = spec.format.duration_sec;
+      if (arc && arc.preset && typeof dur === 'number') {
+        const climaxAt = Math.max(0.5, Math.min(0.95, arc.climax_at ?? 0.85));
+        const climaxSec = climaxAt * dur;
+        const tailSec = dur - climaxSec;
+        const reasons: string[] = [];
+        if (tailSec < 0.8) {
+          reasons.push(`高潮在 ${climaxSec.toFixed(1)} 秒，距结尾仅 ${tailSec.toFixed(1)} 秒（需 ≥ 0.8 秒）`);
+        }
+        if (reasons.length > 0) {
+          issues.push({
+            index: i,
+            spec_key: spec.spec_key,
+            path: `${prefix}format.duration_sec`,
+            code: 'W108',
+            level: 'warn',
+            message: `duration 与 arc 不匹配：${reasons.join('；')}`,
+          });
+        }
+      }
     }
 
     if (!hasError && channel) {

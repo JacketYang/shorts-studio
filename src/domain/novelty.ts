@@ -27,6 +27,12 @@ export interface NoveltyContext {
 
 const STRUCTURAL_AXES = ['mechanic', 'arena', 'rule', 'music_piece', 'hook_style', 'ending'] as const;
 
+/**
+ * T12：对外暴露结构性轴清单，便于测试断言 arc.preset / fx.level
+ * 这类"非结构性差异"不在其中。
+ */
+export const STRUCTURAL_AXES_VISIBLE: readonly string[] = STRUCTURAL_AXES;
+
 export function normalizeTitleForDupCheck(title: string): string {
   return title
     .toLowerCase()
