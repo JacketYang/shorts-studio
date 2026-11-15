@@ -180,6 +180,59 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({ spec, melody
           ctx.lineWidth = 1;
           ctx.stroke();
         }
+      } else if (spec.scene.template === 'rings-escape' && snap.rings) {
+        const cx = w * 0.5;
+        const cy = h * 0.5;
+
+        // T10：多层旋转圆环，每层留一个缺口
+        for (const ring of snap.rings) {
+          const rr = ring.radius * w;
+          const half = ring.gap / 2;
+          const a0 = ring.angle + half;
+          const a1 = ring.angle - half + Math.PI * 2;
+          const colors = ['#38BDF8', '#A78BFA', '#F472B6', '#FBBF24'];
+          const col = colors[ring.idx % colors.length];
+
+          ctx.beginPath();
+          ctx.arc(cx, cy, rr, a0, a1, false);
+          ctx.strokeStyle = col;
+          ctx.lineWidth = Math.max(1.5, w * 0.006);
+          ctx.stroke();
+
+          // 缺口两端的小亮点，让缺口位置一眼可见
+          for (const ga of [ring.angle + half, ring.angle - half]) {
+            ctx.beginPath();
+            ctx.arc(cx + Math.cos(ga) * rr, cy + Math.sin(ga) * rr, Math.max(2, w * 0.008), 0, Math.PI * 2);
+            ctx.fillStyle = col;
+            ctx.fill();
+          }
+        }
+
+        // 球：亮核 + 光晕，保证在环之间清晰可见
+        for (const b of snap.balls) {
+          const bx = cx + (b.x - 0.5) * w;
+          const by = cy + (b.y - 0.5) * w;
+          const br = Math.max(3, b.r * w);
+
+          const grad = ctx.createRadialGradient(bx, by, br * 0.2, bx, by, br * 2.6);
+          grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+          grad.addColorStop(0.45, b.color);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.beginPath();
+          ctx.arc(bx, by, br * 2.6, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(bx, by, br * 1.15, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.92)';
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(bx, by, br, 0, Math.PI * 2);
+          ctx.fillStyle = b.color;
+          ctx.fill();
+        }
       } else if (spec.scene.template === 'ball-sort') {
         // Funnel & bins
         ctx.strokeStyle = 'rgba(226, 232, 240, 0.35)';

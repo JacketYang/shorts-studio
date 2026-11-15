@@ -18,6 +18,7 @@ import {
   FIXTURE_MELODY_BOUNCE,
   FIXTURE_ORBIT_SYNC,
   FIXTURE_PENDULUM_WAVE,
+  FIXTURE_RINGS_ESCAPE,
 } from '../src/domain/templates.ts';
 import type { MelodyEntry, VideoSpec } from '../src/domain/types.ts';
 
@@ -27,6 +28,7 @@ const FIXTURES: Array<{ name: string; spec: VideoSpec }> = [
   { name: 'ball-sort', spec: FIXTURE_BALL_SORT },
   { name: 'pendulum-wave', spec: FIXTURE_PENDULUM_WAVE },
   { name: 'orbit-sync', spec: FIXTURE_ORBIT_SYNC },
+  { name: 'rings-escape', spec: FIXTURE_RINGS_ESCAPE },
 ];
 
 const OUT_DIR = path.resolve(process.cwd(), 'out', 'payloads');

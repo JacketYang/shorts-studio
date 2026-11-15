@@ -296,12 +296,14 @@ export interface SpecRecord {
 
 export interface SimEvent {
   t: number;
-  type: 'wall_bounce' | 'ball_split' | 'bin_drop' | 'note_trigger' | 'gate_pass';
+  type: 'wall_bounce' | 'ball_split' | 'bin_drop' | 'note_trigger' | 'gate_pass' | 'ring_pass';
   x: number;
   y: number;
   intensity: number;
   midi?: number;
   color?: string;
+  /** T10：rings-escape 穿过的环序号 */
+  ring_index?: number;
 }
 
 export interface QACheckItem {

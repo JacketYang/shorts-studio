@@ -373,3 +373,28 @@ def soften_highlights(fb: np.ndarray, threshold: float = 232.0) -> None:
 
     scale = np.where(hot, threshold / np.maximum(m, 1e-3), 1.0).astype(np.float32)
     fb *= scale[:, :, None]
+
+
+def draw_arc_aa(fb: np.ndarray, cx: float, cy: float, r: float,
+                a0: float, a1: float, rgb, alpha: float = 1.0,
+                thickness: float = 3.0, segments: int = 0) -> None:
+    """T10：画一段带抗锯齿的圆弧（用折线逼近）。
+
+    a0 → a1 逆时针；若 a1 < a0 视为跨过 2π。
+    段数按弧长自适应，保证小半径下也不出现明显多边形感。
+    """
+    span = a1 - a0
+    while span <= 0:
+        span += 2.0 * math.pi
+    span = min(span, 2.0 * math.pi)
+    if segments <= 0:
+        segments = max(8, int(span * r / 3.0) + 8)
+    segments = min(segments, 512)
+    px = cx + math.cos(a0) * r
+    py = cy + math.sin(a0) * r
+    for i in range(1, segments + 1):
+        a = a0 + span * (i / segments)
+        nx = cx + math.cos(a) * r
+        ny = cy + math.sin(a) * r
+        draw_line_aa(fb, px, py, nx, ny, thickness, rgb, alpha)
+        px, py = nx, ny

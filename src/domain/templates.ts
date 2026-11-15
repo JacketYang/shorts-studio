@@ -95,6 +95,30 @@ export const OrbitSyncParamsSchema = z.object({
   }),
 });
 
+export const RingsEscapeParamsSchema = z.object({
+  rings: z.object({
+    count: z.number().int().min(3).max(10),
+    base_radius: z.number().min(0.12).max(0.25),
+    radius_step: z.number().min(0.03).max(0.07),
+    gap_deg: z.number().min(18).max(70),
+    rotation_deg_per_s: z.number().min(-90).max(90),
+  }),
+  balls: z.object({
+    count: z.number().int().min(1).max(8),
+    radius: z.number().min(0.012).max(0.03),
+    gravity: z.number().min(0).max(1.0),
+    restitution: z.number().min(0.8).max(1.1),
+  }),
+  rule: z.object({
+    type: z.enum(['respawn_ring', 'shrink_gap', 'ball_split_on_escape']),
+  }),
+  note_trigger: z.object({
+    on: z.enum(['ring_pass']),
+  }),
+});
+
+export type RingsEscapeParams = z.infer<typeof RingsEscapeParamsSchema>;
+
 export interface TemplateDefinition {
   key: string;
   version: string;
@@ -527,6 +551,107 @@ export const FIXTURE_ORBIT_SYNC: VideoSpec = {
   },
 };
 
+export const FIXTURE_RINGS_ESCAPE: VideoSpec = {
+  schema: 'videospec/1',
+  spec_key: 're-6-rings-escape-0005',
+  channel_slug: 'physics-music',
+  concept: {
+    working_title: 'Can This Ball Escape 6 Spinning Rings?',
+    hook_line: 'It has to thread 6 spinning rings',
+    hook_style: 'mystery',
+    payoff: 'The ball slips through every gap one layer at a time while the rings speed up.',
+    emotion: 'tense',
+    series: null,
+    novelty_notes:
+      'Concentric counter-rotating rings with narrow gaps; each escape removes a ring and respawns an outer one.',
+  },
+  format: {
+    aspect: '9:16',
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    duration_sec: 30,
+    loop: { enabled: false, mode: 'none' },
+  },
+  scene: {
+    template: 'rings-escape',
+    template_version: '^1.0',
+    seed: 662014,
+    style: {
+      palette: { family: 'cool', colors: ['#38BDF8', '#A78BFA', '#F472B6', '#FBBF24'] },
+      background: { type: 'gradient', colors: ['#04060F', '#0B1230'] },
+      trail: { enabled: true, length_frames: 16, fade: 0.84 },
+    },
+    arc: { preset: 'tease-then-build', climax_at: 0.86, hook_peek: true },
+    params: {
+      rings: { count: 6, base_radius: 0.16, radius_step: 0.045, gap_deg: 40, rotation_deg_per_s: 24 },
+      balls: { count: 1, radius: 0.02, gravity: 0.25, restitution: 0.95 },
+      rule: { type: 'respawn_ring' },
+      note_trigger: { on: 'ring_pass' },
+    },
+  },
+  timeline: [
+    {
+      t: 0.0,
+      dur: 1.8,
+      type: 'text',
+      role: 'hook',
+      text: 'It has to thread 6 spinning rings',
+      position: 'top-safe',
+      style: 'bold-white-shadow',
+    },
+    {
+      t: -2.4,
+      dur: 2.4,
+      type: 'text',
+      role: 'end_card',
+      text: 'Escaped all 6 rings',
+      position: 'center',
+      style: 'bold-white-shadow',
+    },
+  ],
+  audio: {
+    mode: 'sim-driven',
+    music: {
+      melody_ref: { source: 'library', id: 'gen:pentatonic-5521' },
+      transpose: 5,
+      tempo_bpm: 104,
+      instrument: 'bell',
+      note_mapping: 'per_event',
+      wrap: 'loop',
+      reverb: 0.28,
+    },
+    mix: { target_lufs: -14, true_peak_db: -1 },
+  },
+  publish: {
+    title: 'Can This Ball Escape 6 Spinning Rings?',
+    description:
+      'Six counter-rotating rings, one tiny gap each. One escape per ring.\n#Shorts #rings #satisfying #physics',
+    tags: ['rings escape', 'physics', 'satisfying', 'suspense'],
+    category_id: '24',
+    made_for_kids: false,
+    contains_synthetic_media: false,
+    default_language: 'en',
+    first_comment: '6 rings, 40 degree gaps — would you bet it makes it out? 👇',
+    schedule: { mode: 'auto', window_local: ['18:00', '22:00'] },
+  },
+  axes: {
+    mechanic: 'rings-escape',
+    arena: 'concentric-rings',
+    rule: 'respawn-ring',
+    music_piece: 'gen:pentatonic-5521',
+    hook_style: 'mystery',
+    title_pattern: 'challenge',
+    ending: 'reveal',
+    palette_family: 'cool',
+    instrument: 'bell',
+  },
+  provenance: {
+    generator: { kind: 'human', model: 'fixture', prompt_version: 'specgen-v1' },
+    created_at: '2026-11-15T12:30:00Z',
+  },
+};
+
 export const TEMPLATE_REGISTRY: Record<string, TemplateDefinition> = {
   'melody-bounce': {
     key: 'melody-bounce',
@@ -623,6 +748,60 @@ export const TEMPLATE_REGISTRY: Record<string, TemplateDefinition> = {
         orbits: { type: 'object', required: ['count', 'base_radius', 'radius_step', 'base_omega', 'resonance_ratio'] },
         rule: { type: 'object', required: ['type', 'trigger_angle_deg'] },
         note_trigger: { type: 'object', required: ['on', 'velocity_from'] },
+      },
+    },
+  },
+  'rings-escape': {
+    key: 'rings-escape',
+    version: '1.0.0',
+    name: '圆环逃脱 (Rings Escape)',
+    description: '小球被困在多层反向旋转的圆环中，每穿过一个缺口就逃出一层并触发升调音符。',
+    status: 'beta',
+    paramsSchema: RingsEscapeParamsSchema,
+    events: ['ring_pass', 'wall_bounce'],
+    allowedAxes: {
+      arena: ['concentric-rings'],
+      rule: ['respawn-ring', 'shrink-gap', 'ball-split-on-escape'],
+      ending: ['reveal', 'cut', 'loop'],
+    },
+    estimateCostSec: (spec) => Math.round(spec.format.duration_sec * 1.5 + 28),
+    jsonSchema: {
+      type: 'object',
+      required: ['rings', 'balls', 'rule', 'note_trigger'],
+      properties: {
+        rings: {
+          type: 'object',
+          required: ['count', 'base_radius', 'radius_step', 'gap_deg', 'rotation_deg_per_s'],
+          properties: {
+            count: { type: 'integer', minimum: 3, maximum: 10 },
+            base_radius: { type: 'number', minimum: 0.12, maximum: 0.25 },
+            radius_step: { type: 'number', minimum: 0.03, maximum: 0.07 },
+            gap_deg: { type: 'number', minimum: 18, maximum: 70 },
+            rotation_deg_per_s: { type: 'number', minimum: -90, maximum: 90 },
+          },
+        },
+        balls: {
+          type: 'object',
+          required: ['count', 'radius', 'gravity', 'restitution'],
+          properties: {
+            count: { type: 'integer', minimum: 1, maximum: 8 },
+            radius: { type: 'number', minimum: 0.012, maximum: 0.03 },
+            gravity: { type: 'number', minimum: 0, maximum: 1.0 },
+            restitution: { type: 'number', minimum: 0.8, maximum: 1.1 },
+          },
+        },
+        rule: {
+          type: 'object',
+          required: ['type'],
+          properties: {
+            type: { type: 'string', enum: ['respawn_ring', 'shrink_gap', 'ball_split_on_escape'] },
+          },
+        },
+        note_trigger: {
+          type: 'object',
+          required: ['on'],
+          properties: { on: { type: 'string', enum: ['ring_pass'] } },
+        },
       },
     },
   },

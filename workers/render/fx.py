@@ -347,6 +347,11 @@ class FxSystem:
             # 粒子用 add_glow 绘制（加色，自然发光）
             gfx.add_glow(fb, p.x, p.y, radius * 2.2, p.color, 0.85 * (1.0 - 0.6 * k))
 
+    def shake(self, t: float, amp: float = 6.0) -> None:
+        """T10：触发一次震屏。amp 为像素幅度。"""
+        self.shake_t0 = t
+        self.shake_amp = amp
+
     def shake_offset(self, t: float):
         """返回当前帧的整体位移 (dx, dy)。"""
         age = t - self.shake_t0

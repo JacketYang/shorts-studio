@@ -399,7 +399,261 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
     # =====================================================================
     # pendulum-wave
     # =====================================================================
-    if P.template == "pendulum-wave":
+    # =====================================================================
+    # rings-escape（T10）
+    # =====================================================================
+    if P.template == "rings-escape":
+        _rp = (spec.get("scene") or {}).get("params") or {}
+        _rr = _rp.get("rings") or {}
+        _rb = _rp.get("balls") or {}
+        _rrule = (_rp.get("rule") or {}).get("type", "respawn_ring")
+
+        ring_count0 = max(3, min(10, int(_rr.get("count", 6))))
+        rings_base_r = float(_rr.get("base_radius", 0.16))
+        rings_step_r = float(_rr.get("radius_step", 0.045))
+        rings_gap_deg = max(18.0, min(70.0, float(_rr.get("gap_deg", 40))))
+        rings_rot_deg = float(_rr.get("rotation_deg_per_s", 24))
+
+        rs_ball_count = max(1, min(8, int(_rb.get("count", 1))))
+        rs_ball_r = float(_rb.get("radius", 0.02))
+        rs_gravity = float(_rb.get("gravity", 0.25))
+        rs_restitution = float(_rb.get("restitution", 0.95))
+
+        KINDLY_SEC = 2.5
+        ESCAPE_PULL = 1.6
+
+        def _new_ring(idx, radius, angle0, omega, gap):
+            return {"idx": idx, "radius": radius, "angle0": angle0,
+                    "omega": omega, "gap": gap, "alive": True}
+
+        rs_rings = []
+        for i in range(ring_count0):
+            d = 1 if i % 2 == 0 else -1
+            rs_rings.append(_new_ring(
+                i, rings_base_r + i * rings_step_r,
+                i * 2.0 * math.pi / ring_count0,
+                d * math.radians(rings_rot_deg) * (1.15 ** i),
+                math.radians(rings_gap_deg)))
+        rs_respawned = 0
+
+        def _new_ball(bid, x, y, vx, vy, r, best, color, prev_dist):
+            return {"id": bid, "x": x, "y": y, "vx": vx, "vy": vy, "r": r,
+                    "best": best, "prevDist": prev_dist, "color": color, "trail": []}
+
+        rs_balls = []
+        for i in range(rs_ball_count):
+            ang = i / max(1, rs_ball_count) * 2.0 * math.pi + 0.3
+            r0 = rings_base_r * 0.42
+            rs_balls.append(_new_ball(
+                i, 0.5 + math.cos(ang) * r0, 0.5 + math.sin(ang) * r0,
+                math.cos(ang + 0.15) * 0.46, math.sin(ang + 0.15) * 0.46,
+                rs_ball_r, 0, accent_rgbs[i % len(accent_rgbs)], r0))
+
+        rs_note = 0
+        rs_last_pass = 0.0
+        rs_max_burst = -1e9
+
+        for f_idx in range(total_frames + _WARMUP_FRAMES):
+            t = (f_idx - _WARMUP_FRAMES) * dt
+            _I = arcmod.intensity_of(arc_cfg, t) if t >= 0 else 0.5
+            _hp = arcmod.hook_peek_factor(spec, t) if t >= 0 else 0.0
+            _eff_I = min(1.0, _I + 0.25 * _hp)
+            fx_sys.particle_scale = arcmod.particle_mult(_eff_I) * (1.0 + 0.5 * _hp)
+            fx_sys.silenced = arcmod.is_drop_silence(spec, t) if t >= 0 else False
+            z = frame_zoom(cam, t, duration) * arcmod.zoom_mult(_eff_I) * (1.0 + 0.08 * _hp)
+            np.copyto(work_frame, bg_cache)
+            work_frame *= arcmod.bg_brightness_mult(_eff_I) * (1.0 + 0.15 * _hp)
+            theme.draw_bokeh(work_frame, t if t >= 0 else 0.0)
+            fb = work_frame
+
+            # ---- 温柔作弊：卡住太久就让最内层环慢下来并把缺口转向球 ----
+            if t - rs_last_pass > KINDLY_SEC and t > 0:
+                _live = sorted([r for r in rs_rings if r["alive"]],
+                               key=lambda r: r["radius"])
+                if _live and rs_balls:
+                    _inner = _live[0]
+                    _b = rs_balls[0]
+                    _ball_ang = math.atan2(_b["y"] - 0.5, _b["x"] - 0.5)
+                    _cur = _inner["angle0"] + _inner["omega"] * t
+                    _inner["angle0"] += (_ball_ang - _cur) * 0.12
+                    _inner["omega"] *= 0.97
+
+            _live_sorted = sorted([r for r in rs_rings if r["alive"]],
+                                  key=lambda r: r["radius"])
+
+            # T10：拖尾必须每帧衰减，否则同一位置叠加会糊成竖向光带
+            if trail_on:
+                trail_buf.decay(0.78)
+
+            # ---- 球 ----
+            for b in list(rs_balls):
+                b["vy"] += rs_gravity * dt * 0.28
+                b["x"] += b["vx"] * dt
+                b["y"] += b["vy"] * dt
+
+                _dx = b["x"] - 0.5
+                _dy = b["y"] - 0.5
+                _dist = math.hypot(_dx, _dy)
+                _prev = b["prevDist"]
+
+                # 逃逸张力：太靠近中心时获得向外的加速度
+                if _dist < rings_base_r * 1.15 and _dist > 1e-6:
+                    b["vx"] += (_dx / _dist) * ESCAPE_PULL * dt
+                    b["vy"] += (_dy / _dist) * ESCAPE_PULL * dt
+
+                for li, ring in enumerate(_live_sorted):
+                    gap_center = ring["angle0"] + ring["omega"] * t
+                    half = ring["gap"] / 2.0
+                    ang_diff = math.atan2(_dy, _dx) - gap_center
+                    while ang_diff > math.pi:
+                        ang_diff -= 2 * math.pi
+                    while ang_diff < -math.pi:
+                        ang_diff += 2 * math.pi
+                    in_gap = abs(ang_diff) < half
+
+                    crossed = ((_prev - ring["radius"]) * (_dist - ring["radius"]) <= 0
+                               and _prev != _dist)
+                    band = abs(_dist - ring["radius"])
+
+                    if crossed or band < b["r"] + 0.004:
+                        if in_gap:
+                            if ring["alive"]:
+                                _midi = notes[rs_note % len(notes)]
+                                rs_note += 1
+                                if t >= 0:
+                                    _emit_event(events, spec, t, _midi, 1.0,
+                                                x=b["x"], dur=None, vel=None)
+                                    _sx, _sy = zoom_at(z, b["x"] * W, b["y"] * H)
+                                    fx_sys.spawn(t, _sx, _sy, 1.0, b["color"],
+                                                 palette=accent_rgbs)
+                                    # 震屏
+                                    fx_sys.shake(t, 6.0)
+                                    hud_stats["notes"] = rs_note
+                                rs_last_pass = t
+                                ring["alive"] = False
+                                b["best"] = li + 1
+
+                                if _rrule == "respawn_ring":
+                                    _maxr = max(r["radius"] for r in rs_rings)
+                                    _d = 1 if rs_respawned % 2 == 0 else -1
+                                    rs_rings.append(_new_ring(
+                                        ring_count0 + rs_respawned,
+                                        min(0.72, _maxr + rings_step_r),
+                                        (rs_respawned * 1.7) % (2 * math.pi),
+                                        _d * math.radians(rings_rot_deg)
+                                        * (1.15 ** (ring_count0 + rs_respawned)),
+                                        math.radians(rings_gap_deg)))
+                                    rs_respawned += 1
+                                elif _rrule == "shrink_gap":
+                                    for r2 in rs_rings:
+                                        if r2["alive"] and r2["radius"] > ring["radius"]:
+                                            r2["gap"] *= 0.85
+                                elif _rrule == "ball_split_on_escape":
+                                    if len(rs_balls) < 8:
+                                        _na = math.atan2(b["vy"], b["vx"]) + 0.6
+                                        _sp = math.hypot(b["vx"], b["vy"])
+                                        rs_balls.append(_new_ball(
+                                            len(rs_balls), b["x"], b["y"],
+                                            math.cos(_na) * _sp, math.sin(_na) * _sp,
+                                            b["r"], b["best"],
+                                            accent_rgbs[len(rs_balls) % len(accent_rgbs)],
+                                            b["prevDist"]))
+                        else:
+                            _nx = _dx / (_dist or 1.0)
+                            _ny = _dy / (_dist or 1.0)
+                            _vn = b["vx"] * _nx + b["vy"] * _ny
+                            if ((_dist < ring["radius"] and _vn > 0) or
+                                    (_dist > ring["radius"] and _vn < 0)):
+                                b["vx"] -= (1.0 + rs_restitution) * _vn * _nx
+                                b["vy"] -= (1.0 + rs_restitution) * _vn * _ny
+                                _push = -1.0 if _dist < ring["radius"] else 1.0
+                                b["x"] = 0.5 + _nx * (ring["radius"] + _push * (b["r"] + 0.004))
+                                b["y"] = 0.5 + _ny * (ring["radius"] + _push * (b["r"] + 0.004))
+                                if t >= 0:
+                                    _sx, _sy = zoom_at(z, b["x"] * W, b["y"] * H)
+                                    fx_sys.spawn(t, _sx, _sy, 0.4, b["color"],
+                                                 palette=accent_rgbs)
+                                    # 碰撞只发装饰音（高八度），不推进旋律
+                                    _emit_event(events, spec, t,
+                                                notes[0] + 12 if notes else 72,
+                                                0.4, x=b["x"])
+
+                b["prevDist"] = _dist
+                b["trail"].append((b["x"], b["y"]))
+                if len(b["trail"]) > 14:
+                    b["trail"].pop(0)
+
+            # ---- 绘制环 ----
+            cx_px, cy_px = zoom_at(z, W * 0.5, H * 0.5)
+            for ring in _live_sorted:
+                _rad = ring["radius"] * W * z
+                _gc = ring["angle0"] + ring["omega"] * t
+                _gs = ring["gap"] / 2.0
+                _a0 = _gc + _gs
+                _a1 = _gc - _gs + 2.0 * math.pi
+                _rc = accent_rgbs[ring["idx"] % len(accent_rgbs)]
+                gfx.draw_arc_aa(fb, cx_px, cy_px, _rad, _a0, _a1, _rc, 1.0,
+                                thickness=max(2.0, W * 0.006 * z))
+                # 缺口端点的小亮球
+                for _ga in (_gc + _gs, _gc - _gs):
+                    gfx.draw_disc_aa(fb, cx_px + math.cos(_ga) * _rad,
+                                     cy_px + math.sin(_ga) * _rad,
+                                     max(2.0, W * 0.008 * z), _rc, 1.0)
+
+            # ---- 绘制球 ----
+            for b in rs_balls:
+                _sx, _sy = zoom_at(z, b["x"] * W, b["y"] * H)
+                _sr = b["r"] * W * z
+                if trail_on:
+                    # T10：环内空间小、球速低，拖尾要更细更淡，否则糊成光团
+                    trail_buf.stamp(_sx, _sy, _sr * 1.9, b["color"], 0.30)
+                # 球本体画实心亮核，保证在环之间清晰可见
+                gfx.add_glow(fb, _sx, _sy, _sr * 2.6, b["color"], 0.45)
+                gfx.draw_disc_aa(fb, _sx, _sy, _sr * 1.15, (255, 255, 255), 0.92)
+                gfx.draw_disc_aa(fb, _sx, _sy, _sr, b["color"], 1.0)
+
+            # ---- 全部逃出：中心 reveal 文字 + 最大爆发 ----
+            if not any(r["alive"] for r in rs_rings) and rs_max_burst < 0:
+                rs_max_burst = t
+                fx_sys.spawn(t, W * 0.5, H * 0.5, 1.0, accent_rgbs[0], palette=accent_rgbs)
+                fx_sys.shake(t, 10.0)
+                hud_stats["label_override"] = "ESCAPED!"
+
+            # T9：visual-return
+            if loop_mode == "visual-return" and _first_frame is not None:
+                _lr = arcmod.visual_return_weight(t, duration)
+                if _lr > 0:
+                    _out = composer.render(fb, trail_buf.buf if trail_on else None,
+                                           shift=fx_sys.shake_offset(t), bg=bg_cache)
+                    _out *= (1.0 - _lr)
+                    _out += _first_frame * _lr
+                else:
+                    _out = composer.render(fb, trail_buf.buf if trail_on else None,
+                                           shift=fx_sys.shake_offset(t), bg=bg_cache)
+            else:
+                _out = composer.render(fb, trail_buf.buf if trail_on else None,
+                                       shift=fx_sys.shake_offset(t), bg=bg_cache)
+            if (loop_mode == "visual-return" and _first_frame is None
+                    and f_idx >= _WARMUP_FRAMES):
+                _first_frame = np.copy(_out)
+            if loop_mode == "visual-return" and arcmod.visual_return_weight(t, duration) > 0.99:
+                fx_sys.clear_transients()
+
+            text_layer.draw(_out, t, hud_stats)
+            if f_idx >= _WARMUP_FRAMES:
+                _qa_i = f_idx - _WARMUP_FRAMES
+                if _qa_i < int(1.5 * fps):
+                    _thumb = _out[::16, ::16, :].mean(axis=2)
+                    if _qa_prev is not None:
+                        _d = float(np.abs(_thumb - _qa_prev).mean())
+                        if _d < arcmod.STATIC_DIFF_THRESHOLD:
+                            print(f"  ⚠️ [QA] 第 {_qa_i} 帧（t={t:.2f}s）画面几乎静止，"
+                                  f"帧差 {_d:.3f} < {arcmod.STATIC_DIFF_THRESHOLD}",
+                                  file=sys.stderr)
+                    _qa_prev = _thumb
+                proc.stdin.write(composer.finish(_out))
+
+    elif P.template == "pendulum-wave":
         pd = P.pendulum
         count = pd.count
         max_angle = math.radians(pd.max_angle_deg)

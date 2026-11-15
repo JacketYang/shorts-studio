@@ -23,6 +23,10 @@ export interface SimFrameSnapshot {
   pendulums?: Array<{ pivotX: number; pivotY: number; bobX: number; bobY: number; r: number; color: string }>;
   orbits?: Array<{ cx: number; cy: number; ringR: number; angle: number; bobX: number; bobY: number; r: number; color: string }>;
   triggerAngleRad?: number;
+  /** T10：rings-escape 的存活圆环快照 */
+  rings?: Array<{ radius: number; angle: number; gap: number; idx: number }>;
+  /** T10：已逃出的层数 */
+  escaped?: number;
 }
 
 export interface DeterministicSimOutput {
@@ -291,6 +295,242 @@ export function runDeterministicSimulation(
           triggerAngleRad,
         });
       }
+    }
+  } else if (spec.scene.template === 'rings-escape') {
+    const p = spec.scene.params as {
+      rings?: { count?: number; base_radius?: number; radius_step?: number; gap_deg?: number; rotation_deg_per_s?: number };
+      balls?: { count?: number; radius?: number; gravity?: number; restitution?: number };
+      rule?: { type?: string };
+    };
+    const ringCount0 = Math.max(3, Math.min(10, p.rings?.count ?? 6));
+    const baseR = p.rings?.base_radius ?? 0.16;
+    const stepR = p.rings?.radius_step ?? 0.045;
+    const gapDeg = Math.max(18, Math.min(70, p.rings?.gap_deg ?? 40));
+    const rotDeg = p.rings?.rotation_deg_per_s ?? 24;
+    const ballCount = Math.max(1, Math.min(8, p.balls?.count ?? 1));
+    const ballR = p.balls?.radius ?? 0.02;
+    const gravity = p.balls?.gravity ?? 0.25;
+    const restitution = p.balls?.restitution ?? 0.95;
+    const ruleType = p.rule?.type ?? 'respawn_ring';
+
+    // ---- 环 ----
+    interface Ring {
+      idx: number;
+      radius: number;
+      angle0: number;
+      omega: number;
+      gap: number;
+      alive: boolean;
+    }
+    const rings: Ring[] = [];
+    for (let i = 0; i < ringCount0; i++) {
+      const dir = i % 2 === 0 ? 1 : -1;
+      const speedMul = Math.pow(1.15, i);
+      rings.push({
+        idx: i,
+        radius: baseR + i * stepR,
+        angle0: (i * 2 * Math.PI) / ringCount0,
+        omega: (dir * rotDeg * Math.PI) / 180 * speedMul,
+        gap: (gapDeg * Math.PI) / 180,
+        alive: true,
+      });
+    }
+    let respawned = 0;
+
+    // ---- 球 ----
+    interface RBall {
+      id: number;
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      r: number;
+      best: number; // 当前所在的最内层环索引（已逃出的层数）
+      prevDist: number;
+      color: string;
+      trail: Array<{ x: number; y: number }>;
+    }
+    const balls: RBall[] = [];
+    for (let i = 0; i < ballCount; i++) {
+      const ang = (i / Math.max(1, ballCount)) * Math.PI * 2 + 0.3;
+      const r0 = baseR * 0.42;
+      // 初速指向最近的缺口方向（让第一次逃出尽早发生，制造 hook）
+      balls.push({
+        id: i,
+        x: 0.5 + Math.cos(ang) * r0,
+        y: 0.5 + Math.sin(ang) * r0,
+        vx: Math.cos(ang + 0.15) * 0.46,
+        vy: Math.sin(ang + 0.15) * 0.46,
+        r: ballR,
+        best: 0,
+        prevDist: r0,
+        color: palette[i % palette.length],
+        trail: [],
+      });
+    }
+
+    let noteCursor2 = 0;
+    // 温柔作弊：若 6 秒没穿过任何缺口，减速最内层环并把缺口转向球
+    let lastPassT = 0;
+    const KINDNESS_SEC = 2.5;
+
+    for (let f = 0; f < totalFrames; f++) {
+      const t = Number((f * dt).toFixed(4));
+
+      // --- 温柔作弊 ---
+      if (t - lastPassT > KINDNESS_SEC) {
+        const live = rings.filter((r) => r.alive).sort((a, b) => a.radius - b.radius);
+        if (live.length > 0 && balls.length > 0) {
+          const inner = live[0];
+          const b = balls[0];
+          const ballAng = Math.atan2(b.y - 0.5, b.x - 0.5);
+          const cur = inner.angle0 + inner.omega * t;
+          // 缺口中心角度 = cur；把缺口缓慢转向球所在方向
+          const target = inner.angle0 + (ballAng - cur) * 0.12;
+          inner.angle0 = target;
+          inner.omega *= 0.97;
+        }
+      }
+
+      const frameBalls: SimFrameSnapshot['balls'] = [];
+      const liveSorted = rings.filter((r) => r.alive).sort((a, b) => a.radius - b.radius);
+
+      for (const b of balls) {
+        b.vy += gravity * dt * 0.28;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+
+        const dx = b.x - 0.5;
+        const dy = b.y - 0.5;
+        const dist = Math.hypot(dx, dy);
+        const prevDist = b.prevDist;
+
+        // 逃逸张力：球太靠近中心时获得向外的加速度，
+        // 否则会被困在内圈反复弹跳，"能不能逃出"的悬念就消失了。
+        if (dist < baseR * 1.15 && dist > 1e-6) {
+          const pull = 1.6 * dt;
+          b.vx += (dx / dist) * pull;
+          b.vy += (dy / dist) * pull;
+        }
+
+        for (let li = 0; li < liveSorted.length; li++) {
+          const ring = liveSorted[li];
+          const gapCenter = ring.angle0 + ring.omega * t;
+          const half = ring.gap / 2;
+          let angDiff = Math.atan2(dy, dx) - gapCenter;
+          while (angDiff > Math.PI) angDiff -= 2 * Math.PI;
+          while (angDiff < -Math.PI) angDiff += 2 * Math.PI;
+          const inGap = Math.abs(angDiff) < half;
+
+          // 用"是否跨越该环半径"判定，避免球速过快时整帧跳过环
+          const crossed = (prevDist - ring.radius) * (dist - ring.radius) <= 0
+                          && prevDist !== dist;
+          const band = Math.abs(dist - ring.radius);
+          if (crossed || band < b.r + 0.004) {
+            if (inGap) {
+              // 穿过缺口
+              if (ring.alive && li >= 0) {
+                const midi = getMelodyNoteMidi(melody, noteCursor2++, transpose);
+                events.push({
+                  t,
+                  type: 'ring_pass',
+                  x: Number(b.x.toFixed(4)),
+                  y: Number(b.y.toFixed(4)),
+                  intensity: 1.0,
+                  midi,
+                  color: b.color,
+                  ring_index: ring.idx,
+                });
+                lastPassT = t;
+                ring.alive = false;
+                b.best = li + 1;
+
+                if (ruleType === 'respawn_ring') {
+                  // 在最外层再生成一个新环（半径上限 0.72，避免跑出画面）
+                  const maxR = Math.max(...rings.map((r) => r.radius));
+                  const dir = respawned % 2 === 0 ? 1 : -1;
+                  rings.push({
+                    idx: ringCount0 + respawned,
+                    radius: Math.min(0.72, maxR + stepR),
+                    angle0: Math.random() * 0,
+                    omega: (dir * rotDeg * Math.PI) / 180 * Math.pow(1.15, ringCount0 + respawned),
+                    gap: (gapDeg * Math.PI) / 180,
+                    alive: true,
+                  });
+                  respawned++;
+                } else if (ruleType === 'shrink_gap') {
+                  for (const r2 of rings) {
+                    if (r2.alive && r2.radius > ring.radius) r2.gap *= 0.85;
+                  }
+                } else if (ruleType === 'ball_split_on_escape') {
+                  if (balls.length < 8) {
+                    const na = Math.atan2(b.vy, b.vx) + 0.6;
+                    const sp = Math.hypot(b.vx, b.vy);
+                    balls.push({
+                      id: balls.length,
+                      x: b.x,
+                      y: b.y,
+                      vx: Math.cos(na) * sp,
+                      vy: Math.sin(na) * sp,
+                      r: b.r,
+                      best: b.best,
+                      prevDist: b.prevDist,
+                      color: palette[(palette.length - 1 - balls.length % palette.length) % palette.length],
+                      trail: [],
+                    });
+                  }
+                }
+              }
+            } else {
+              // 撞在环实体上 → 反弹
+              const nx = dx / (dist || 1);
+              const ny = dy / (dist || 1);
+              const vn = b.vx * nx + b.vy * ny;
+              if ((dist < ring.radius && vn > 0) || (dist > ring.radius && vn < 0)) {
+                b.vx -= (1 + restitution) * vn * nx;
+                b.vy -= (1 + restitution) * vn * ny;
+                const push = dist < ring.radius ? -1 : 1;
+                b.x = 0.5 + nx * (ring.radius + push * (b.r + 0.004));
+                b.y = 0.5 + ny * (ring.radius + push * (b.r + 0.004));
+                events.push({
+                  t,
+                  type: 'wall_bounce',
+                  x: Number(b.x.toFixed(4)),
+                  y: Number(b.y.toFixed(4)),
+                  intensity: 0.4,
+                  midi: getMelodyNoteMidi(melody, 0, transpose) + 12,
+                  color: b.color,
+                });
+              }
+            }
+          }
+        }
+
+        b.prevDist = dist;
+        b.trail.push({ x: Number(b.x.toFixed(4)), y: Number(b.y.toFixed(4)) });
+        if (b.trail.length > 14) b.trail.shift();
+        frameBalls.push({
+          x: Number(b.x.toFixed(4)),
+          y: Number(b.y.toFixed(4)),
+          r: b.r,
+          color: b.color,
+        });
+      }
+
+      snapshots.push({
+        t,
+        arenaAngle: 0,
+        arenaScale: 1,
+        balls: frameBalls,
+        rings: rings
+          .filter((r) => r.alive)
+          .map((r) => ({
+            radius: Number(r.radius.toFixed(4)),
+            angle: Number((r.angle0 + r.omega * t).toFixed(4)),
+            gap: Number(r.gap.toFixed(4)),
+            idx: r.idx,
+          })),
+      });
     }
   } else {
     // Default: melody-bounce

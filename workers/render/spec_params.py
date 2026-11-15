@@ -222,6 +222,19 @@ _TPL_DEFAULTS = {
         },
         "audio": {"transpose": 0, "tempo_bpm": 96.0},
     },
+    "rings-escape": {
+        "rings": {"count": 6, "base_radius": 0.16, "radius_step": 0.045,
+                  "gap_deg": 40.0, "rotation_deg_per_s": 24.0},
+        "balls": {"count": 1, "radius": 0.02, "gravity": 0.25, "restitution": 0.95},
+        "rule": {"type": "respawn_ring"},
+        "note_trigger": {"on": "ring_pass"},
+        "style": {
+            "background": {"type": "gradient", "colors": ["#04060F", "#0B1230"]},
+            "trail": {"enabled": True, "length_frames": 16, "fade": 0.84},
+            "camera": {"zoom_from": 1.0, "zoom_to": 1.12, "shake": 0.0},
+        },
+        "audio": {"transpose": 5, "tempo_bpm": 104.0},
+    },
     "ball-sort": {
         "balls": {"count": 24, "colors": ["#FF595E", "#FFCA3A", "#8AC926", "#1982C4"]},
         "bins": {"count": 4, "layout": "under-funnel"},
@@ -367,6 +380,7 @@ def load_params(spec: dict) -> SpecParams:
         "pendulum-wave": ("center_crossing", "peak_reversal"),
         "orbit-sync": ("beam_crossing", "planet_alignment"),
         "ball-sort": ("peg_collision", "bin_settle"),
+        "rings-escape": ("ring_pass",),
     }[template_key]
     p.note_trigger = NoteTriggerParams(
         on=pick(nt_raw.get("on", nt_def.get("on")), allowed_on, nt_def.get("on")),
