@@ -19,7 +19,29 @@ export interface WeeklyScoreboardSummary {
     explore10: string[];
   };
   weeklyHighlight: string;
+  /** T13：arc.preset 维度的 Thompson 分配（权重低于 mechanic/music_piece） */
+  arcArms?: ArmScore[];
+  /** T13：fx.level 维度的 Thompson 分配 */
+  fxArms?: ArmScore[];
+  /** T13：探索档里按这两个维度各分到的候选 */
+  explorationAssignments?: {
+    arcPreset: string | null;
+    fxLevel: number | null;
+  };
 }
+
+/** T13：两个新维度的探索权重（低于 mechanic/music_piece 的主权重） */
+export const EXPLORE_DIMENSION_WEIGHTS = {
+  mechanic: 1.0,
+  music_piece: 0.85,
+  arc_preset: 0.35,
+  fx_level: 0.25,
+} as const;
+
+/** T13：arc_preset 的合法取值（与 scene.arc.preset 一致） */
+export const ARC_PRESETS = ['ramp', 'tease-then-build', 'wave', 'countdown', 'drop'] as const;
+/** T13：fx.level 的合法取值 */
+export const FX_LEVELS = [2, 3] as const;
 
 /**
  * Deterministic Thompson-like arm ranking & 60/30/10 weekly portfolio recommendation (docs 05 §4.3 & §8.2).
@@ -83,6 +105,87 @@ export function computeScoreboardAndMix(videos: RemoteVideo[], specs: SpecRecord
   const adjacent30 = arms.filter((a) => a.allocationBucket === 'adjacent_30').map((a) => a.arm);
   const explore10 = arms.filter((a) => a.allocationBucket === 'explore_10').map((a) => a.arm);
 
+  // -------------------------------------------------------------------------
+  // T13：把 arc_preset 与 fx_level 作为两个独立 arm 维度
+  // 用同一套 Thompson 打分，但探索权重按 EXPLORE_DIMENSION_WEIGHTS 压低，
+  // 保证它们只在"探索"档里分样本，不抢 mechanic / music_piece 的主份额。
+  // -------------------------------------------------------------------------
+  const arcBuckets = new Map<string, { count: number; views: number; subs: number; rewardSum: number; stayedSum: number }>();
+  const fxBuckets = new Map<string, { count: number; views: number; subs: number; rewardSum: number; stayedSum: number }>();
+
+  for (const v of active) {
+    const linked = specByTitle.get(v.title.toLowerCase());
+    if (!linked) continue;
+    const { arc_preset, fx_level } = linked.spec.axes;
+
+    if (typeof arc_preset === 'string' && arc_preset.length > 0) {
+      const cur = arcBuckets.get(arc_preset) ?? { count: 0, views: 0, subs: 0, rewardSum: 0, stayedSum: 0 };
+      cur.count += 1;
+      cur.views += v.views;
+      cur.subs += v.subs_gained - v.subs_lost;
+      cur.rewardSum += v.reward_score ?? 0;
+      cur.stayedSum += v.stayed_to_watch_pct;
+      arcBuckets.set(arc_preset, cur);
+    }
+    if (typeof fx_level === 'number') {
+      const key = String(fx_level);
+      const cur = fxBuckets.get(key) ?? { count: 0, views: 0, subs: 0, rewardSum: 0, stayedSum: 0 };
+      cur.count += 1;
+      cur.views += v.views;
+      cur.subs += v.subs_gained - v.subs_lost;
+      cur.rewardSum += v.reward_score ?? 0;
+      cur.stayedSum += v.stayed_to_watch_pct;
+      fxBuckets.set(key, cur);
+    }
+  }
+
+  const buildArms = (
+    buckets: Map<string, { count: number; views: number; subs: number; rewardSum: number; stayedSum: number }>,
+    dimensionWeight: number,
+  ): ArmScore[] => {
+    const list: ArmScore[] = Array.from(buckets.entries()).map(([arm, agg]) => {
+      const avgReward = agg.count > 0 ? agg.rewardSum / agg.count : 0;
+      const avgStayedPct = agg.count > 0 ? agg.stayedSum / agg.count : 0;
+      const subsPer1k = agg.views > 0 ? (agg.subs / agg.views) * 1000 : 0;
+      const explorationBonus = 1 / Math.sqrt(agg.count + 1);
+      const tsScore = Number(
+        (
+          (avgReward + subsPer1k * 0.35 + (avgStayedPct - 45) * 0.04 + explorationBonus * 0.6) * dimensionWeight
+        ).toFixed(2),
+      );
+      return {
+        arm,
+        count: agg.count,
+        totalViews: agg.views,
+        avgReward: Number(avgReward.toFixed(2)),
+        avgStayedPct: Number(avgStayedPct.toFixed(1)),
+        subsPer1k: Number(subsPer1k.toFixed(2)),
+        thompsonSampleScore: tsScore,
+        allocationBucket: 'adjacent_30' as const,
+      };
+    });
+    list.sort((a, b) => b.thompsonSampleScore - a.thompsonSampleScore);
+    return list.map((a, idx) => {
+      let allocationBucket: ArmScore['allocationBucket'] = 'adjacent_30';
+      if (idx === 0) allocationBucket = 'core_60';
+      else if (a.count <= 1 || idx === list.length - 1) allocationBucket = 'explore_10';
+      return { ...a, allocationBucket };
+    });
+  };
+
+  const arcArms = buildArms(arcBuckets, EXPLORE_DIMENSION_WEIGHTS.arc_preset);
+  const fxArms = buildArms(fxBuckets, EXPLORE_DIMENSION_WEIGHTS.fx_level);
+
+  // 探索档：优先选样本最少（最未知）的那个取值；没有历史时给一个启动值
+  const explorationAssignments = {
+    arcPreset: arcArms.length === 0
+      ? (ARC_PRESETS[0] as string)
+      : [...arcArms].sort((a, b) => a.count - b.count || b.thompsonSampleScore - a.thompsonSampleScore)[0].arm,
+    fxLevel: fxArms.length === 0
+      ? (FX_LEVELS[0] as number)
+      : Number([...fxArms].sort((a, b) => a.count - b.count || b.thompsonSampleScore - a.thompsonSampleScore)[0].arm),
+  };
+
   const topArm = arms[0];
   const weeklyHighlight = topArm
     ? `本周主打 (${topArm.arm}) 均值继续观看 ${topArm.avgStayedPct}%、订阅转化 ${topArm.subsPer1k}/千播，建议下周维持 60% 主打 / 30% 邻近变体 / 10% 探索新规则。`
@@ -96,6 +199,9 @@ export function computeScoreboardAndMix(videos: RemoteVideo[], specs: SpecRecord
       explore10: explore10.length ? explore10 : ['pendulum-wave · contrast'],
     },
     weeklyHighlight,
+    arcArms,
+    fxArms,
+    explorationAssignments,
   };
 }
 

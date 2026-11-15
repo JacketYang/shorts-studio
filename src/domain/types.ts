@@ -176,6 +176,10 @@ export interface VideoSpec {
     ending: EndingType;
     palette_family?: string;
     instrument?: string;
+    /** T13：从 scene.arc.preset 复制而来，供 bandit 探索与记分牌展示 */
+    arc_preset?: string;
+    /** T13：从 scene.style.fx.level 复制而来 */
+    fx_level?: number;
   };
   provenance: {
     generator: {

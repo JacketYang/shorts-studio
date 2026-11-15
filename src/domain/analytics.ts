@@ -34,22 +34,30 @@ export function scoreChannelVideos(videos: RemoteVideo[]): RemoteVideo[] {
   const medianViews = median(viewsList);
 
   const stayedSeries = recentActive.map((v) => v.stayed_to_watch_pct);
-  const pctSeries = recentActive.map((v) => Math.min(v.avg_view_pct, 150));
+  // T13：平均观看百分比一律先 min(…, 100) 再算 —— 循环播放会把它顶到 100 以上，
+  // 不封顶会让"可循环"而不是"好看"主导奖励。
+  const pctSeries = recentActive.map((v) => Math.min(v.avg_view_pct, 100));
   const subRateSeries = recentActive.map((v) => (v.views > 0 ? ((v.subs_gained - v.subs_lost) / v.views) * 1000 : 0));
-  const engageRateSeries = recentActive.map((v) => (v.views > 0 ? ((v.shares + v.comments) / v.views) * 1000 : 0));
+  // T13：分享率从"互动"里拆出来单独成项（每千次观看分享数）
+  const shareRateSeries = recentActive.map((v) => (v.views > 0 ? (v.shares / v.views) * 1000 : 0));
+  const likeRateSeries = recentActive.map((v) => (v.views > 0 ? (v.likes / v.views) * 1000 : 0));
 
   return videos.map((v) => {
     if (v.is_legacy || v.views < 300) {
       return { ...v, performance_tier: v.is_legacy ? 'pending' : v.views < 100 ? 'flop' : 'solid' };
     }
     const subRate = ((v.subs_gained - v.subs_lost) / v.views) * 1000;
-    const engageRate = ((v.shares + v.comments) / v.views) * 1000;
+    const shareRate = (v.shares / v.views) * 1000;
+    const likeRate = (v.likes / v.views) * 1000;
 
+    // T13 权重重构：继续观看 0.35 / 平均观看百分比 0.15（降低，被循环虚高）/
+    //               订阅率 0.25 / 分享率 0.15 / 点赞率 0.10
     const reward =
       0.35 * robustZ(v.stayed_to_watch_pct, stayedSeries) +
-      0.25 * robustZ(Math.min(v.avg_view_pct, 150), pctSeries) +
+      0.15 * robustZ(Math.min(v.avg_view_pct, 100), pctSeries) +
       0.25 * robustZ(subRate, subRateSeries) +
-      0.15 * robustZ(engageRate, engageRateSeries);
+      0.15 * robustZ(shareRate, shareRateSeries) +
+      0.10 * robustZ(likeRate, likeRateSeries);
 
     let tier: RemoteVideo['performance_tier'] = 'solid';
     if (v.views >= 10_000 || (medianViews > 0 && v.views >= 5 * medianViews)) {

@@ -240,6 +240,9 @@ export const VideoSpecSchema = z.object({
     ending: z.enum(['loop', 'reveal', 'cut']),
     palette_family: z.string().optional(),
     instrument: z.string().optional(),
+    // T13：这两个字段由 scene 自动同步，旧 Spec 可缺省
+    arc_preset: z.string().optional(),
+    fx_level: z.number().int().optional(),
   }),
   provenance: z.object({
     generator: z.object({
@@ -347,6 +350,43 @@ export interface BatchValidationResult {
   issues: ValidationIssue[];
 }
 
+/**
+ * T13：把 scene.arc.preset 与 scene.style.fx.level 同步到 axes.arc_preset / axes.fx_level。
+ *
+ * - 旧 Spec（没有这两个字段）保持 axes 为空，不报错
+ * - 已经显式写了 axes.arc_preset / axes.fx_level 的，不覆盖
+ */
+export function syncAxesFromScene(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object') return raw;
+  const spec = raw as Record<string, unknown>;
+  const scene = spec.scene as Record<string, unknown> | undefined;
+  if (!scene || typeof scene !== 'object') return raw;
+
+  const arc = scene.arc as Record<string, unknown> | undefined;
+  const style = scene.style as Record<string, unknown> | undefined;
+  const fx = style && typeof style === 'object' ? (style.fx as Record<string, unknown> | undefined) : undefined;
+
+  const arcPreset = arc && typeof arc === 'object' && typeof arc.preset === 'string' ? arc.preset : undefined;
+  const fxLevel = fx && typeof fx === 'object' && typeof fx.level === 'number' ? fx.level : undefined;
+  if (arcPreset === undefined && fxLevel === undefined) return raw;
+
+  const axesIn = spec.axes;
+  const axes: Record<string, unknown> = axesIn && typeof axesIn === 'object' ? { ...(axesIn as Record<string, unknown>) } : {};
+
+  let changed = false;
+  if (arcPreset !== undefined && axes.arc_preset === undefined) {
+    axes.arc_preset = arcPreset;
+    changed = true;
+  }
+  if (fxLevel !== undefined && axes.fx_level === undefined) {
+    axes.fx_level = fxLevel;
+    changed = true;
+  }
+  if (!changed) return raw;
+
+  return { ...spec, axes };
+}
+
 export function validateImportPayload(
   rawPayload: unknown,
   ctx: {
@@ -414,10 +454,14 @@ export function validateImportPayload(
         ? String((rawItem as Record<string, unknown>).spec_key)
         : undefined;
 
-    const itemCopy =
+    let itemCopy =
       rawItem && typeof rawItem === 'object' && ctx.overrideChannelSlug
         ? { ...(rawItem as Record<string, unknown>), channel_slug: ctx.overrideChannelSlug }
         : rawItem;
+
+    // T13：把 scene.arc.preset / scene.style.fx.level 自动复制到 axes，
+    // 供 bandit 探索与记分牌使用。显式写过的 axes 值优先（不覆盖）。
+    itemCopy = syncAxesFromScene(itemCopy);
 
     const parsed = VideoSpecSchema.safeParse(itemCopy);
     if (!parsed.success) {

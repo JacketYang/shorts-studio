@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { BarChart3, ChevronDown, ChevronUp, Edit3, EyeOff, FileSpreadsheet, RefreshCw, Sparkles, Trash2 } from 'lucide-react';
 import type { RemoteVideo } from '../domain/types';
 import type { StudioState } from '../types/ui';
@@ -33,6 +33,50 @@ export const VideosView: React.FC<VideosViewProps> = ({ state, onRefresh, onNavi
   const [editDescription, setEditDescription] = useState('');
   const [expandedCurveId, setExpandedCurveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // T13：把每条 arm 对应的 arc / fx 找出来。arm 的 key 是
+  // `${mechanic} · ${hook_style}`，与 bandit 里的拼法一致。
+  // 旧视频没有这两个字段时显示 "-"。
+  const { arcByArm, fxByArm } = useMemo(() => {
+    const arc = new Map<string, string>();
+    const fx = new Map<string, string>();
+    const specByTitle = new Map(
+      (state.specs ?? []).map((sr) => [sr.spec.publish.title.toLowerCase(), sr.spec]),
+    );
+    for (const v of state.remote_videos ?? []) {
+      const sp = specByTitle.get(v.title.toLowerCase());
+      if (!sp) continue;
+      const key = `${sp.axes.mechanic} · ${sp.axes.hook_style}`;
+      const arcPreset = sp.axes.arc_preset ?? sp.scene.arc?.preset;
+      const fxLevel = sp.axes.fx_level ?? sp.scene.style?.fx?.level;
+      // 同一 arm 可能有多条视频，取第一个有值的
+      if (arcPreset && !arc.has(key)) arc.set(key, arcPreset);
+      if (typeof fxLevel === 'number' && !fx.has(key)) fx.set(key, String(fxLevel));
+    }
+    return { arcByArm: arc, fxByArm: fx };
+  }, [state.remote_videos, state.specs]);
+
+  // T13：各 arc 的平均继续观看率。至少 3 条样本才显示数字。
+  const arcStayedStats = useMemo(() => {
+    const acc = new Map<string, { sum: number; n: number }>();
+    const specByTitle = new Map(
+      (state.specs ?? []).map((sr) => [sr.spec.publish.title.toLowerCase(), sr.spec]),
+    );
+    for (const v of state.remote_videos ?? []) {
+      if (v.is_legacy) continue;
+      const sp = specByTitle.get(v.title.toLowerCase());
+      if (!sp) continue;
+      const arcPreset = sp.axes.arc_preset ?? sp.scene.arc?.preset;
+      if (!arcPreset) continue;
+      const cur = acc.get(arcPreset) ?? { sum: 0, n: 0 };
+      cur.sum += v.stayed_to_watch_pct;
+      cur.n += 1;
+      acc.set(arcPreset, cur);
+    }
+    return [...acc.entries()]
+      .map(([preset, { sum, n }]) => ({ preset, n, avg: n > 0 ? sum / n : 0 }))
+      .sort((a, b) => b.avg - a.avg);
+  }, [state.remote_videos, state.specs]);
 
   const displayedVideos =
     subTab === 'legacy'
@@ -588,6 +632,34 @@ export const VideosView: React.FC<VideosViewProps> = ({ state, onRefresh, onNavi
               </div>
             </div>
 
+            {/* T13：各 arc 的平均继续观看率汇总。至少 3 条样本才显示数字。 */}
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+                <BarChart3 className="h-3.5 w-3.5 text-slate-500" />
+                各 arc 的平均继续观看率
+                <span className="font-normal text-slate-500">（每档至少 3 条样本才显示数字）</span>
+              </div>
+              {arcStayedStats.length === 0 ? (
+                <div className="mt-2 rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">
+                  暂无 arc 数据。旧视频没有记录 arc，或还没有导入带 arc 的 Spec 的指标。
+                </div>
+              ) : (
+                <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
+                  {arcStayedStats.map((row) => (
+                    <div key={row.preset} className="rounded border border-slate-200 bg-white px-3 py-2">
+                      <div className="font-mono text-[11px] text-slate-500">{row.preset}</div>
+                      <div className="mt-0.5 text-sm font-semibold tabular-nums text-slate-900">
+                        {row.n >= 3 ? `${row.avg.toFixed(1)}%` : '-'}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        {row.n >= 3 ? `${row.n} 条样本` : `样本不足 (${row.n}/3)`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
@@ -598,6 +670,8 @@ export const VideosView: React.FC<VideosViewProps> = ({ state, onRefresh, onNavi
                     <th className="py-2 pr-4 text-right">平均奖励分</th>
                     <th className="py-2 pr-4 text-right">继续观看%</th>
                     <th className="py-2 pr-4 text-right">订阅 / 千播</th>
+                    <th className="py-2 pr-4 text-right">arc</th>
+                    <th className="py-2 pr-4 text-right">fx</th>
                     <th className="py-2 pr-4 text-right">TS 采样分</th>
                     <th className="py-2 text-right">下周配比槽位</th>
                   </tr>
@@ -611,6 +685,12 @@ export const VideosView: React.FC<VideosViewProps> = ({ state, onRefresh, onNavi
                       <td className="py-2 pr-4 text-right text-slate-700">{arm.avgReward.toFixed(2)}</td>
                       <td className="py-2 pr-4 text-right text-slate-700">{arm.avgStayedPct.toFixed(1)}%</td>
                       <td className="py-2 pr-4 text-right text-slate-900">{arm.subsPer1k.toFixed(2)}</td>
+                      <td className="py-2 pr-4 text-right text-slate-700">
+                        {arcByArm.get(arm.arm) ?? '-'}
+                      </td>
+                      <td className="py-2 pr-4 text-right text-slate-700">
+                        {fxByArm.get(arm.arm) ?? '-'}
+                      </td>
                       <td className="py-2 pr-4 text-right font-semibold text-slate-900">
                         {arm.thompsonSampleScore.toFixed(2)}
                       </td>
@@ -621,7 +701,7 @@ export const VideosView: React.FC<VideosViewProps> = ({ state, onRefresh, onNavi
                   ))}
                   {state.scoreboard.arms.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="py-4 text-center font-sans text-slate-500">
+                      <td colSpan={10} className="py-4 text-center font-sans text-slate-500">
                         暂无已发布的非历史视频指标，导入 CSV 或同步 YouTube 数据后自动计算。
                       </td>
                     </tr>
