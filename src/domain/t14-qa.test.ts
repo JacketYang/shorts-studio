@@ -148,7 +148,10 @@ test('节奏偏差超过 25ms 时 rhythm_deviation 判失败', () => {
     const payloadPath = path.join(tmp, 'p.json');
     fs.writeFileSync(payloadPath, JSON.stringify({
       spec: { format: { duration_sec: 3, loop: { enabled: false, mode: 'none' } }, scene: { template: 'melody-bounce' }, timeline: [] },
-      events: [{ t: 0.2, midi: 60, intensity: 1.0, dev_ms: 90 }, { t: 0.8, midi: 62, intensity: 1.0, dev_ms: 80 }],
+      // 需要 ≥8 个节奏锁定音符才会判定（短视频里样本太少时降级为无法判定）
+      events: Array.from({ length: 10 }, (_, i) => ({
+        t: 0.2 + i * 0.25, midi: 60 + i, intensity: 1.0, dev_ms: 80 + (i % 3) * 10,
+      })),
     }), 'utf8');
     const out = path.join(tmp, 'v.qa.json');
     execFileSync('python3', [SCRIPT, mp4, payloadPath, out], { cwd: REPO, stdio: 'pipe' });

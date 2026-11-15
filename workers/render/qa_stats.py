@@ -35,6 +35,7 @@ HOOK_EXIT_MAX = 2.40           # 3) 钩子文字退场
 JUICE_WINDOW = 0.30            # 4) 强事件周围窗口
 INTENSITY_RATIO_MIN = 1.20     # 5) 后30% / 前30%
 RHYTHM_DEV_MAX_MS = 25.0       # 6) 旋律型平均偏差
+RHYTHM_MIN_SAMPLES = 8         # 6) 至少这么多个节奏锁定音符才判定
 SAFE_TOP = 0.08                # 9) 顶部 8%
 SAFE_BOTTOM = 0.20             # 9) 底部 20%
 ENDING_RATIO_MAX = 0.50        # 10) 首尾帧差 / 中间帧差
@@ -279,8 +280,16 @@ def check_intensity_rise(diffs, frames=None):
 def check_rhythm_deviation(events, template):
     if template not in ("melody-bounce", "rings-escape"):
         return item("rhythm_deviation", True, f"{template} 不适用", "旋律型视频平均偏差 ≤25ms", "warn")
-    # 渲染器把偏差写进事件附加字段时优先用它；否则用事件间隔的抖动估计
+    # 渲染器只给"按旋律节拍发声"的事件写了 dev_ms（T8 的节奏锁定路径），
+    # 其余碰撞音与旋律节拍无关，没有偏差概念。
     devs = [float(e["dev_ms"]) for e in events if "dev_ms" in e]
+    if len(devs) < RHYTHM_MIN_SAMPLES:
+        # 样本太少时无法判定，不能据此判失败：
+        # 短视频里节奏锁定的音符本来就少，硬判会把正常成片打成失败。
+        return item("rhythm_deviation", True,
+                    f"节奏锁定音符仅 {len(devs)} 个，样本不足无法判定"
+                    f"（需 ≥{RHYTHM_MIN_SAMPLES} 个）",
+                    f"≤ {RHYTHM_DEV_MAX_MS}ms", "warn")
     if devs:
         mean = sum(abs(d) for d in devs) / len(devs)
         return item("rhythm_deviation", mean <= RHYTHM_DEV_MAX_MS,
