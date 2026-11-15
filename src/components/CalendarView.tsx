@@ -16,6 +16,13 @@ import {
 } from 'lucide-react';
 import type { VideoRecord } from '../domain/types';
 import type { StudioState } from '../types/ui';
+import {
+  COMMON_TIMEZONES,
+  DEFAULT_TIMEZONE,
+  timezoneOffsetLabel,
+  utcToZonedWallTime,
+  zonedWallTimeToUtc,
+} from '../domain/timezone';
 import { workbenchMetaToWorkbenchSpec } from '../workbench/bridge';
 import { renderVideo } from '../workbench/engine/render';
 import { buildScene, themeOf } from '../workbench/scenes';
@@ -37,6 +44,16 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
   // 定时发布弹窗：选中的视频 + 用户设定的公开时间
   const [scheduleTarget, setScheduleTarget] = useState<VideoRecord | null>(null);
   const [scheduleAt, setScheduleAt] = useState<string>('');
+  // 默认 UTC+8；YouTube Studio 也允许直接选时区，这里对齐
+  const [scheduleTz, setScheduleTz] = useState<string>(DEFAULT_TIMEZONE);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+
+  // 把"所选时区的墙上时间"换算成 UTC，供预览与提交使用
+  const scheduleUtc = useMemo(
+    () => (scheduleAt ? zonedWallTimeToUtc(scheduleAt, scheduleTz) : null),
+    [scheduleAt, scheduleTz]
+  );
+  const schedulePreviewUtc = scheduleUtc ? scheduleUtc.toISOString().replace('.000Z', 'Z') : null;
   const [renderingId, setRenderingId] = useState<string | null>(null);
   const [renderProgress, setRenderProgress] = useState<{ stage: string; p: number } | null>(null);
 
@@ -419,7 +436,11 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                         type="button"
                         disabled={busy}
                         title="上传为 private + publishAt，到点由 YouTube 自动公开"
-                        onClick={() => setScheduleTarget(v)}
+                        onClick={() => {
+                          setScheduleError(null);
+                          setScheduleAt(utcToZonedWallTime(new Date(Date.now() + 3 * 3600_000), scheduleTz));
+                          setScheduleTarget(v);
+                        }}
                         className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
                       >
                         <CalendarClock className="h-3.5 w-3.5" />
@@ -572,18 +593,43 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
 
             <div className="space-y-2">
               <label htmlFor="schedule-at" className="block text-xs font-medium text-slate-600">
-                公开时间（本地时区）
+                公开时间与所在时区
               </label>
-              <input
-                id="schedule-at"
-                type="datetime-local"
-                value={scheduleAt}
-                onChange={(e) => setScheduleAt(e.target.value)}
-                className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
-              />
+              <div className="flex gap-2">
+                <input
+                  id="schedule-at"
+                  type="datetime-local"
+                  value={scheduleAt}
+                  onChange={(e) => setScheduleAt(e.target.value)}
+                  className="min-w-0 flex-1 rounded border border-slate-300 px-3 py-2 text-sm"
+                />
+                <select
+                  aria-label="时区"
+                  value={scheduleTz}
+                  onChange={(e) => setScheduleTz(e.target.value)}
+                  className="w-44 shrink-0 rounded border border-slate-300 px-2 py-2 text-xs"
+                >
+                  {COMMON_TIMEZONES.map((tz) => (
+                    <option key={tz.id} value={tz.id}>
+                      {tz.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <p className="text-[11px] text-slate-500">
                 必须晚于当前时间 1 分钟。YouTube 会按这个时间自动公开。
+                {schedulePreviewUtc && (
+                  <>
+                    {' '}届时为 UTC <span className="font-mono">{schedulePreviewUtc}</span>
+                    （{timezoneOffsetLabel(scheduleTz, new Date(schedulePreviewUtc))}）。
+                  </>
+                )}
               </p>
+              {scheduleError && (
+                <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                  {scheduleError}
+                </p>
+              )}
               <div className="flex flex-wrap gap-1.5">
                 {[
                   { label: '15 分钟后', min: 15 },
@@ -595,12 +641,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                     key={q.min}
                     type="button"
                     onClick={() => {
+                      // 按所选时区计算墙上时间，而不是浏览器本地时区
                       const d = new Date(Date.now() + q.min * 60_000);
-                      // datetime-local 需要本地时间字符串
-                      const pad = (n: number) => String(n).padStart(2, '0');
-                      setScheduleAt(
-                        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-                      );
+                      setScheduleAt(utcToZonedWallTime(d, scheduleTz));
                     }}
                     className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
                   >
@@ -623,10 +666,26 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ state, onRefresh }) 
                 disabled={busy || !scheduleAt}
                 onClick={async () => {
                   const target = scheduleTarget;
+                  setScheduleError(null);
+                  if (!scheduleAt) {
+                    setScheduleError('请先选择公开时间');
+                    return;
+                  }
+                  const utc = zonedWallTimeToUtc(scheduleAt, scheduleTz);
+                  if (!utc) {
+                    setScheduleError('时间格式无效，请重新选择');
+                    return;
+                  }
+                  if (utc.getTime() < Date.now() + 60_000) {
+                    setScheduleError(
+                      `该时间在过去或距现在不足 1 分钟（换算后 UTC ${utc.toISOString().replace('.000Z', 'Z')}）`
+                    );
+                    return;
+                  }
                   setScheduleTarget(null);
                   await handlePublishAction(target.id, {
                     action: 'schedule_publish',
-                    publishAt: new Date(scheduleAt).toISOString(),
+                    publishAt: utc.toISOString(),
                   });
                 }}
                 className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
