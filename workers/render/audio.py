@@ -14,6 +14,7 @@ render_audio(wav_path, spec, events, duration, seed, arc_cfg) -> dict
 import math
 import struct
 import wave
+import zlib
 
 import numpy as np
 
@@ -279,7 +280,10 @@ def _render_note(bus, t_sec, midi, intensity, instrument, pan, dur=None, vel=Non
     if n <= 0:
         return
 
-    rng = np.random.default_rng(abs(hash((instrument, round(t_sec, 3), int(midi)))) % (2 ** 32))
+    # 稳定哈希：Python 的 hash() 对字符串受 PYTHONHASHSEED 随机化影响，
+    # 会让同一 payload 两次渲染出不同音频。改用 zlib.crc32。
+    _key = f"{instrument}|{round(t_sec, 3)}|{int(midi)}".encode("utf-8")
+    rng = np.random.default_rng(zlib.crc32(_key) % (2 ** 32))
     wav = builder(freq, n, rng)
 
     # intensity 线性映射到 0.35–1.0

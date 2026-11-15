@@ -237,12 +237,14 @@ class RhythmLock:
     # -- 速度计算 -------------------------------------------------------
 
     def solve_speed(self, t_now, px, py, dx, dy, radius, spd_m=1.0):
-        """撞墙后计算新速度（严格按任务原文的实现）。
+        """撞墙后设速，让"下一次撞墙"正好落在下一个音符上。
 
-        1. 取下一个尚未发声的音符 t_next，Δt = t_next - t_now
-        2. 算沿新方向到下一次撞墙的距离 d
-        3. 速度 = d / Δt，限制在 [0.55, 1.8] × 基准速度
-        4. 若被限幅，音符"跟随最近一次碰撞"发声，偏差由调用方判 80ms
+        返回 (speed, note, real_dev)。
+        note 非 None 表示本次碰撞承载该音符并已计入统计。
+
+        说明：声音在"本次碰撞"发出，但本次碰撞时刻是由上一次设速决定的。
+        所以本次的偏差 = |t_now - note.t|；若不达标就丢弃，并按
+        d/Δt 重新设速，让下一次撞墙对上再下一个音符。
         """
         m = spd_m if spd_m > 1e-6 else 1.0
         lo = SPEED_MIN_MULT * self.base_speed
@@ -252,65 +254,59 @@ class RhythmLock:
         if note is None:
             return None, None, None
 
+        real_dev = t_now - note["t"]
+
+        # 本次碰撞命中了当前音符
+        if abs(real_dev) <= MAX_TOLERANCE_SEC:
+            self.next_index += 1
+            self.deviations.append(abs(real_dev))
+            self.emitted += 1
+            # 设速瞄准下一个音符
+            speed = self._aim_speed(t_now, px, py, dx, dy, radius, m, lo, hi)
+            return (speed if speed is not None else self.base_speed), note, real_dev
+
+        # 已经过期（本次碰撞来晚了）：丢弃，并瞄准下一个
+        if real_dev > MAX_TOLERANCE_SEC:
+            self.dropped += 1
+            self.next_index += 1
+            speed = self._aim_speed(t_now, px, py, dx, dy, radius, m, lo, hi)
+            return speed, None, real_dev
+
+        # 音符还在前方：本次不发声，按 d/Δt 设速去追
+        speed = self._aim_speed(t_now, px, py, dx, dy, radius, m, lo, hi)
+        return speed, None, real_dev
+
+    def _aim_speed(self, t_now, px, py, dx, dy, radius, m, lo, hi):
+        """算出让"下一次撞墙"落在下一个音符上的速度（已限幅）。"""
+        note = self.schedule.at_index(self.next_index)
+        if note is None:
+            return None
         dt_need = note["t"] - t_now
         if dt_need <= 1e-6:
-            # 音符时刻已到/已过：跟随本次碰撞发声
-            self.next_index += 1
-            if -dt_need <= MAX_TOLERANCE_SEC:
-                self.deviations.append(-dt_need)
-                self.emitted += 1
-                return self.base_speed, note, dt_need
-            # 过期太远：丢弃，并尝试追上下一个（不要卡在同一个音符上）
-            self.dropped += 1
-            return self.solve_speed(t_now, px, py, dx, dy, radius, spd_m)
+            return self.base_speed
 
         angle = self.get_angle(t_now)
+        wall_r = radius if self.shape_sides == 0 else radius / math.cos(math.pi / self.shape_sides)
 
-        # 注意：渲染器把球心钳制在以 radius 为半径的外接圆上，
-        # 而多边形的边在内切圆处。所以墙面外接圆半径 = radius / cos(π/sides)。
-        # 用真实墙面求交，才能算准"到下一次撞墙"的距离。
-        if self.shape_sides == 0:
-            wall_r = radius
-        else:
-            wall_r = radius / math.cos(math.pi / self.shape_sides)
-
-        # 球刚撞墙时位置贴在墙上，射线会立刻打在相邻边/顶点附近，
-        # 得到只有几像素的假距离。自适应地沿出射方向推出一段再求交：
-        # 取"距离足够长（≥ 0.3×半径）"的最小 step_out。
         dist = None
         for _so in (0.0, 0.04, 0.08, 0.12, 0.18, 0.25, 0.35, 0.5):
             d_try = distance_to_wall(self.shape_sides, self.cx, self.cy, wall_r,
-                                     angle, px, py, dx, dy,
-                                     step_out=radius * _so)
+                                     angle, px, py, dx, dy, step_out=radius * _so)
             if d_try is not None and d_try >= radius * 0.30:
                 dist = d_try
                 break
             if dist is None and d_try is not None:
                 dist = d_try
         if dist is None or dist <= 1e-9:
-            return None, None, None
+            return None
 
-        raw_speed = dist / (dt_need * m)
+        raw = dist / (dt_need * m)
         self.needed_mult_max = max(self.needed_mult_max,
-                                   raw_speed / self.base_speed if self.base_speed else 0.0)
-        speed = max(lo, min(hi, raw_speed))
-        clamped = abs(speed - raw_speed) > 1e-9
-        if clamped:
+                                   raw / self.base_speed if self.base_speed else 0.0)
+        spd = max(lo, min(hi, raw))
+        if abs(spd - raw) > 1e-9:
             self.clamped_count += 1
-
-        actual_dt = dist / (speed * m) if speed > 1e-9 else dt_need
-        dev = actual_dt - dt_need
-
-        # 无论命中还是丢弃，这个音符都算处理过 —— 推进索引，
-        # 否则下一次撞墙还会拿到同一个音符，导致永久错位。
-        self.next_index += 1
-        if abs(dev) <= MAX_TOLERANCE_SEC:
-            self.deviations.append(abs(dev))
-            self.emitted += 1
-        else:
-            self.dropped += 1
-
-        return speed, note, dev
+        return spd
 
     def prime_initial_velocity(self, t_now, px, py, vx, vy, radius, spd_m=1.0):
         """开局对准：让球第一次撞墙恰好落在第一个未发声的音符上。
