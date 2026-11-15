@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Info, X } from 'lucide-react';
+import { Check, Info, ShieldAlert, X } from 'lucide-react';
 import type { RejectionReasonTag } from '../domain/types';
 import type { StudioState } from '../types/ui';
 import { SimulationPlayer } from './SimulationPlayer';
@@ -150,6 +150,23 @@ export const ReviewView: React.FC<ReviewViewProps> = ({ state, onRefresh, onNavi
         </div>
 
         <div className="space-y-5 rounded-lg border border-slate-200 bg-white p-6 lg:col-span-7">
+          {/* T14：自动 QA 得分偏低时提示"建议重做"，但不阻止人工放行 */}
+          {typeof currentRender.qa_score === 'number' && currentRender.qa_score < 0.8 && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <div className="flex items-center gap-1.5 font-semibold">
+                <ShieldAlert className="h-3.5 w-3.5" />
+                建议重做（自动 QA 得分 {(currentRender.qa_score * 10).toFixed(0)}/10）
+              </div>
+              <div className="mt-1 text-amber-800">
+                以下检查未通过：
+                {(currentRender.auto_qa?.checks ?? [])
+                  .filter((c) => !c.passed)
+                  .map((c) => c.name)
+                  .join('、') || '（详见渲染记录）'}
+                。仍可人工放行。
+              </div>
+            </div>
+          )}
           <div>
             <label htmlFor="review-title-input" className="block text-xs font-medium text-slate-600">
               发布标题 (可修改后通过 · ≤ 100 字符)

@@ -294,7 +294,8 @@ class FrameComposer:
 
 
 def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float,
-                x: float = None, dur: float = None, vel: float = None) -> bool:
+                x: float = None, dur: float = None, vel: float = None,
+                dev_ms: float = None) -> bool:
     """T5：drop preset 的蓄力静默窗内抑制所有音频事件。
 
     返回 True 表示已写入。物理与事件时刻不受影响，只是"不发声"。
@@ -309,6 +310,9 @@ def _emit_event(events: list, spec: dict, t: float, midi: int, intensity: float,
         ev["dur"] = float(dur)
     if vel is not None:
         ev["vel"] = float(vel)
+    # T14：节奏偏差（毫秒），供 qa_stats 的 rhythm_deviation 使用
+    if dev_ms is not None:
+        ev["dev_ms"] = float(dev_ms)
     events.append(ev)
     return True
 
@@ -1502,7 +1506,8 @@ def simulate_and_render_frames(spec: dict, melody: dict | None, proc: subprocess
                             if _note is not None and _spd is not None:
                                 _emit_event(events, spec, t, _note["pitch"], 0.9,
                                             x=b["x"], dur=_note["dur"],
-                                            vel=_note["vel"])
+                                            vel=_note["vel"],
+                                            dev_ms=(abs(_dev) * 1000.0 if _dev is not None else None))
                                 note_idx += 1
                                 hud_stats["notes"] = note_idx
                         elif rhythm_lock is not None:
@@ -1710,6 +1715,35 @@ def render_mp4(payload_path: str, output_mp4: str):
             output_mp4,
         ]
         subprocess.run(mux_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # T14：渲染完成后跑自动 QA，把结果写到 <output>.qa.json。
+        # QA 失败不影响成片产出（只作为审核参考）。
+        _write_qa_report(output_mp4, spec, events, tmpdir)
+
+
+def _write_qa_report(output_mp4: str, spec: dict, events: list, tmpdir: str) -> None:
+    """T14：调用 qa_stats.py 分析成片，写 <output>.qa.json。"""
+    try:
+        import qa_stats  # 同目录
+    except Exception as exc:      # pragma: no cover - 环境缺失时静默降级
+        print(f"  ⚠️ QA 跳过：无法加载 qa_stats（{exc}）", file=sys.stderr)
+        return
+
+    try:
+        # 事件带上节奏偏差（若渲染器记录了），供 rhythm_deviation 使用
+        payload = {"spec": spec, "events": events}
+        qa_path = os.path.splitext(output_mp4)[0] + ".qa.json"
+        result = qa_stats.analyze(output_mp4, payload)
+        with open(qa_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        n_ok = sum(1 for c in result["checks"] if c["passed"])
+        print(f"  🧪 QA {result['qa_score']:.2f} ({n_ok}/10) → {os.path.basename(qa_path)}",
+              file=sys.stderr)
+        for c in result["checks"]:
+            if not c["passed"]:
+                print(f"     ✗ {c['name']}: {c['actual']}", file=sys.stderr)
+    except Exception as exc:
+        print(f"  ⚠️ QA 失败：{exc}", file=sys.stderr)
 
 
 def main(argv: list) -> int:

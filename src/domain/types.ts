@@ -320,6 +320,25 @@ export interface QACheckItem {
   severity: 'error' | 'warn';
 }
 
+/**
+ * T14：渲染后自动 QA 的报告（workers/render/qa_stats.py 的产出）。
+ * checks 直接复用 QACheckItem，不另建一套结构。
+ */
+export interface QaReport {
+  /** 通过项数 / 总项数，0–1 */
+  qa_score: number;
+  /** error 级检查是否全部通过 */
+  qa_passed: boolean;
+  checks: QACheckItem[];
+  meta: {
+    duration_sec: number;
+    template: string;
+    frames_sampled: number;
+    audio_samples: number;
+    events: number;
+  };
+}
+
 export interface NoveltyRuleViolation {
   rule: string;
   severity: 'warn' | 'block';
@@ -365,6 +384,10 @@ export interface RenderRecord {
   events: SimEvent[];
   qa_checks: QACheckItem[];
   qa_passed: boolean;
+  /** T14：渲染后自动 QA 的得分（0–1）；旧记录没有 */
+  qa_score?: number | null;
+  /** T14：自动 QA 的完整报告 */
+  auto_qa?: QaReport | null;
   novelty: NoveltyReport;
   visual_qa?: VisualQAResult | null;
   remote_url?: string | null;

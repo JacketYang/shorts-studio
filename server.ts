@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { parseStudioCsv, scoreChannelVideos } from './src/domain/analytics.ts';
 import { computeQuotaSummary, getPacificDateString, YOUTUBE_QUOTA_COSTS } from './src/domain/quota.ts';
 import { FIXTURE_BALL_SORT, FIXTURE_MELODY_BOUNCE, FIXTURE_ORBIT_SYNC, FIXTURE_PENDULUM_WAVE, TEMPLATE_REGISTRY } from './src/domain/templates.ts';
-import type { Channel, ChannelProfile, CompilationChapter, CompilationRecord, RejectionReasonTag, SpecRecord } from './src/domain/types.ts';
+import type { Channel, ChannelProfile, CompilationChapter, CompilationRecord, QaReport, RejectionReasonTag, RenderRecord, SpecRecord } from './src/domain/types.ts';
 import {
   IdeaBatchSchema,
   MelodyEntrySchema,
@@ -83,12 +83,46 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * T14：读取渲染器写出的 <id>.qa.json。文件不存在或格式错误时返回 null
+ * （旧视频没有这个文件，属于正常情况，不能报错）。
+ */
+function readQaReport(file: string): QaReport | null {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as QaReport;
+    if (!raw || !Array.isArray(raw.checks)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T14：把渲染后自动 QA 合并进 RenderRecord。
+ *
+ * - auto_qa 存完整报告
+ * - qa_score 是 0–1 的通过率
+ * - qa_checks 里同名的项被自动 QA 覆盖（自动 QA 是实测，比 sim 预估更可信），
+ *   没同名的追加在后面
+ */
+function mergeAutoQa(render: RenderRecord, qa: QaReport | null): void {
+  if (!qa) return;
+  const autoNames = new Set(qa.checks.map((c) => c.name));
+  const kept = render.qa_checks.filter((c) => !autoNames.has(c.name));
+  render.qa_checks = [...kept, ...qa.checks];
+  render.auto_qa = qa;
+  render.qa_score = qa.qa_score;
+  // error 级自动检查全部通过，且原有 error 检查也通过，才算整体通过
+  render.qa_passed = qa.qa_passed && render.qa_checks.filter((c) => c.severity === 'error').every((c) => c.passed);
+}
+
 async function ensureRenderedMp4(
   renderId: string,
   spec: SpecRecord['spec'],
   melodies: ReturnType<typeof loadDb>['melodies'],
   storageConfig: ReturnType<typeof loadDb>['storage_config']
-): Promise<{ mp4File: string; remoteUrl: string | null }> {
+): Promise<{ mp4File: string; remoteUrl: string | null; qa: QaReport | null }> {
   const dirs = resolveMediaDirectories(storageConfig);
   const specFile = path.join(dirs.cacheDir, `${renderId}.json`);
   const mp4File = path.join(dirs.rendersDir, `${renderId}.mp4`);
@@ -118,7 +152,9 @@ async function ensureRenderedMp4(
       }
     }
   }
-  return { mp4File, remoteUrl };
+  // T14：读取渲染器写出的 <renderId>.qa.json（不存在则返回 null）
+  const qa = readQaReport(path.join(dirs.rendersDir, `${renderId}.qa.json`));
+  return { mp4File, remoteUrl, qa };
 }
 
 async function startServer() {
@@ -770,14 +806,18 @@ async function startServer() {
       const specRec = db.specs.find((s) => s.id === render.spec_id);
       if (!specRec) return res.status(404).json({ error: 'Spec not found' });
 
-      const { mp4File, remoteUrl } = await ensureRenderedMp4(
+      const { mp4File, remoteUrl, qa } = await ensureRenderedMp4(
         render.id,
         specRec.spec,
         db.melodies,
         db.storage_config
       );
+      // T14：把自动 QA 结果合并进 RenderRecord（与 sim 侧的 qa_checks 并存）
+      mergeAutoQa(render, qa);
       if (remoteUrl && !render.remote_url) {
         render.remote_url = remoteUrl;
+      }
+      if (qa || (remoteUrl && !render.remote_url)) {
         saveDb(db);
       }
       if (!fs.existsSync(mp4File) && render.remote_url) {
