@@ -44,12 +44,16 @@ export interface Plan {
   unit: number;
 }
 
-export function planNotes(song: Song, o: { target?: number; lead?: number; rounds?: number; speedup?: number } = {}): Plan {
+export function planNotes(
+  song: Song,
+  o: { target?: number; lead?: number; rounds?: number; speedup?: number; transpose?: number } = {}
+): Plan {
   const toks = parseSong(song.notes);
   const B = toks.reduce((a, t) => a + t.beats, 0);
   const sp = o.speedup ?? 1;
   const target = o.target ?? 26;
   const lead = o.lead ?? 0.9;
+  const pitchMul = o.transpose ? Math.pow(2, o.transpose / 12) : 1;
   const geo = (r: number) => { let s = 0; for (let i = 0; i < r; i++) s += Math.pow(sp, i); return s; };
   const unitFor = (r: number) => (target - lead - 0.8) / (B * geo(r));
   let rounds = o.rounds ?? 1;
@@ -62,7 +66,7 @@ export function planNotes(song: Song, o: { target?: number; lead?: number; round
     const unit = unit0 * Math.pow(sp, r);
     for (const k of toks) {
       if (!k.rest) {
-        notes.push({ t, f: k.f, name: k.name, dur: clamp(k.beats * unit * 1.6, 0.3, 1.3), idx: idx++, round: r, speed: 1 / Math.pow(sp, r) });
+        notes.push({ t, f: k.f * pitchMul, name: k.name, dur: clamp(k.beats * unit * 1.6, 0.3, 1.3), idx: idx++, round: r, speed: 1 / Math.pow(sp, r) });
       }
       t += k.beats * unit;
     }

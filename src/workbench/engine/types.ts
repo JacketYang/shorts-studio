@@ -1,7 +1,21 @@
 export const W = 1080;
 export const H = 1920;
 
-export type Voice = 'marimba' | 'bell' | 'pluck' | 'click' | 'blip' | 'thud' | 'pad' | 'tick';
+export type Voice =
+  | 'marimba'
+  | 'bell'
+  | 'pluck'
+  | 'click'
+  | 'blip'
+  | 'thud'
+  | 'pad'
+  | 'tick'
+  | 'kalimba'
+  | 'celesta'
+  | 'rhodes'
+  | 'pizzicato';
+
+export type StageStyle = 'paper' | 'bauhaus' | 'blueprint' | 'oscilloscope' | 'editorial' | 'concert';
 
 export interface AudioEvent {
   t: number;
@@ -14,9 +28,17 @@ export interface AudioEvent {
 
 export interface Theme {
   name: string;
+  labelZh: string;
+  style: StageStyle;
+  isLight: boolean;
   bg: [string, string];
   accent: string[];
   ink: string;
+  subInk: string;
+  accentInk: string;
+  muted: string;
+  grid: string;
+  successInk: string;
 }
 
 export type Ctx = CanvasRenderingContext2D;

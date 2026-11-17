@@ -11,6 +11,7 @@ import {
   loadDb,
   normalizeAiConfig,
   runCronTick,
+  updateSpecCreative,
 } from './store.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -289,6 +290,102 @@ test('enqueueWorkbenchItems supports in_review pipeline entry, promotion to sche
   assert.equal(promoteEnq.createdCount, 1);
   assert.ok(promoteEnq.entries[0].videoId);
   assert.equal(specRec.status, 'scheduled');
+
+  // Adding a second identical-engine/theme/title item on the same channel triggers real novelty checks instead of a hardcoded 95
+  const cloneItem = {
+    ...sampleItem,
+    id: 'lorenz-test-02',
+    baseId: 'lorenz-test-02',
+    filename: 'lorenz-test-02',
+  };
+  const dupEnq = enqueueWorkbenchItems(db, ch.id, [cloneItem], { autoSchedule: false });
+  assert.equal(dupEnq.createdCount, 1);
+  const dupRender = db.renders.find((r) => r.id === dupEnq.entries[0].renderId)!;
+  assert.ok(dupRender.novelty.score < 95, `Expected real lowered novelty score for duplicate item, got ${dupRender.novelty.score}`);
+  assert.ok(dupRender.novelty.violations.length > 0 || dupRender.novelty.verdict !== 'pass');
+});
+
+test('updateSpecCreative updates Workbench params, tempoScale, voice, invalidates stale media_ready, and updates Native Studio specs', () => {
+  const db = structuredClone(loadDb());
+  const ch = db.channels[0];
+
+  // 1) Workbench spec path
+  const wbRes = enqueueWorkbenchItems(
+    db,
+    ch.id,
+    [
+      {
+        id: 'hop-tune-01',
+        baseId: 'hop-tune-01',
+        engine: 'hop',
+        params: { song: 'canon', voice: 'marimba', tempoScale: 1, echo: true },
+        seed: 55555,
+        theme: 0,
+        category: 'music',
+        catLabel: '🎵 旋律弹跳',
+        title: 'Canon Hop Original',
+        hook: 'Wait for the drop',
+        description: 'Canon hop test',
+        tags: ['music', 'canon'],
+        filename: 'hop-tune-01',
+        durationSec: 26,
+      },
+    ],
+    { autoSchedule: false }
+  );
+  const wbSpecId = wbRes.entries[0].specId;
+  const wbRender = db.renders.find((r) => r.id === wbRes.entries[0].renderId)!;
+  wbRender.media_ready = true;
+  const prevHash = wbRender.file_sha256;
+
+  const updatedWb = updateSpecCreative(db, wbSpecId, {
+    title: 'Turkish March 1.5x Hop',
+    hookLine: '1.5x Speed Celesta',
+    theme: 2,
+    seed: 77777,
+    paramsPatch: { tempoScale: 1.5, songId: 'turkish', voice: 'celesta', echo: false },
+  });
+
+  const wbParams = updatedWb.render?.workbench_meta?.params as Record<string, unknown>;
+  assert.equal(updatedWb.spec.spec.publish.title, 'Turkish March 1.5x Hop');
+  assert.equal(updatedWb.spec.spec.concept.hook_line, '1.5x Speed Celesta');
+  assert.equal(updatedWb.spec.spec.audio.music?.tempo_bpm, 162);
+  assert.equal(updatedWb.spec.spec.axes.instrument, 'celesta');
+  assert.equal(updatedWb.render?.workbench_meta?.theme, 2);
+  assert.equal(updatedWb.render?.workbench_meta?.seed, 77777);
+  assert.equal(wbParams?.tempoScale, 1.5);
+  assert.equal(wbParams?.voice, 'celesta');
+  assert.equal(wbParams?.echo, false);
+  assert.equal(updatedWb.render?.media_ready, false);
+  assert.notEqual(updatedWb.render?.file_sha256, prevHash);
+
+  // 2) Native Studio spec path
+  const nativeSpec = db.specs.find((s) => !db.renders.some((r) => r.spec_id === s.id && r.workbench_meta));
+  assert.ok(nativeSpec, 'Expected at least one native spec in default database');
+  const nextMelody = db.melodies[1]?.id ?? db.melodies[0]?.id ?? 'pd:canon-in-d';
+  const prevRendersCount = db.renders.filter((r) => r.spec_id === nativeSpec.id).length;
+
+  const updatedNative = updateSpecCreative(db, nativeSpec.id, {
+    title: 'Native Kalimba 148 BPM Edition',
+    audioPatch: {
+      tempoBpm: 148,
+      instrument: 'kalimba',
+      melodyId: nextMelody,
+      transpose: 2,
+      reverb: 0,
+    },
+    motionSpeedScale: 1.25,
+    paletteFamily: 'warm',
+  });
+
+  assert.equal(updatedNative.spec.spec.publish.title, 'Native Kalimba 148 BPM Edition');
+  assert.equal(updatedNative.spec.spec.audio.music?.tempo_bpm, 148);
+  assert.equal(updatedNative.spec.spec.audio.music?.instrument, 'kalimba');
+  assert.equal(updatedNative.spec.spec.audio.music?.transpose, 2);
+  assert.equal(updatedNative.spec.spec.audio.music?.reverb, 0);
+  assert.equal(updatedNative.spec.spec.axes.instrument, 'kalimba');
+  assert.equal(updatedNative.spec.spec.axes.palette_family, 'warm');
+  assert.ok(db.renders.filter((r) => r.spec_id === nativeSpec.id).length >= prevRendersCount + 1);
 });
 
 

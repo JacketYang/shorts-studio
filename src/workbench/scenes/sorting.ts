@@ -1,5 +1,5 @@
 import type { AudioEvent, Builder } from '../engine/types';
-import { TAU, clamp, hsl, text } from '../engine/util';
+import { TAU, clamp, hsl, pal, scaleFreqs, text } from '../engine/util';
 
 type Op = [number, number, number];
 
@@ -148,6 +148,7 @@ function runAlgo(name: string, init: number[]): Op[] {
 }
 
 export const buildSorting: Builder = (c, p) => {
+  const theme = c.theme;
   const algo: string = p.algo;
   const n: number = p.n;
   const view: 'bars' | 'circle' | 'dots' | 'pyramid' = p.view;
@@ -164,7 +165,10 @@ export const buildSorting: Builder = (c, p) => {
   const hl: Int16Array[] = [];
   const cmpC: number[] = [], wrC: number[] = [];
   const audio: AudioEvent[] = [];
-  const freq = (v: number) => 150 * Math.pow(2, (3.2 * v) / n);
+  const scaleIdx: number = p.scale ?? 0;
+  const sc = scaleFreqs(scaleIdx, 196, 20);
+  const voice: AudioEvent['voice'] = p.voice ?? 'blip';
+  const freq = (v: number) => sc[clamp(Math.floor(((v - 1) / Math.max(1, n - 1)) * (sc.length - 1)), 0, sc.length - 1)];
   let oi = 0, cc = 0, wc = 0;
   for (let s = 0; s < snaps; s++) {
     const end = s === snaps - 1 ? ops.length : Math.floor((s + 1) * per);
@@ -178,14 +182,15 @@ export const buildSorting: Builder = (c, p) => {
     frames.push(Uint16Array.from(disp));
     hl.push(Int16Array.from([ta, tb]));
     cmpC.push(cc); wrC.push(wc);
-    if (ta >= 0) audio.push({ t: s / 60 + 0.1, f: freq(disp[ta]), voice: 'blip', v: 0.35, pan: (ta / n - 0.5) * 0.8 });
-    if (tb >= 0 && s % 2 === 0) audio.push({ t: s / 60 + 0.1, f: freq(disp[tb]), voice: 'blip', v: 0.25, pan: (tb / n - 0.5) * 0.8 });
+    if (ta >= 0) audio.push({ t: s / 60 + 0.1, f: freq(disp[ta]), voice, v: 0.36, pan: (ta / n - 0.5) * 0.8 });
+    if (tb >= 0 && s % 2 === 0) audio.push({ t: s / 60 + 0.1, f: freq(disp[tb]), voice, v: 0.24, pan: (tb / n - 0.5) * 0.8 });
   }
   const sweepT = sortDur + 0.5;
   const sweepD = 1.5;
-  for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 60))) audio.push({ t: sweepT + (i / n) * sweepD + 0.1, f: freq(i + 1), voice: 'bell', v: 0.4, pan: (i / n - 0.5) * 0.8 });
+  for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 60))) audio.push({ t: sweepT + (i / n) * sweepD + 0.1, f: freq(i + 1), voice: 'celesta', v: 0.4, pan: (i / n - 0.5) * 0.8 });
   const duration = sweepT + sweepD + 1.3;
   const info = ALGOS[algo];
+  const usePalette = theme.style === 'bauhaus' || theme.style === 'paper';
 
   return {
     duration,
@@ -198,7 +203,12 @@ export const buildSorting: Builder = (c, p) => {
       const sweeping = t >= sweepT;
       const sw = sweeping ? ((t - sweepT) / sweepD) * n : -1;
       const hot = (i: number) => (t < sortDur && (i === h[0] || i === h[1])) || (sweeping && i <= sw);
-      const col = (i: number, v: number) => (sweeping && i <= sw ? hsl((v / n) * 300, 90, 76) : t < sortDur && (i === h[0] || i === h[1]) ? '#ffffff' : hsl((v / n) * 300, 85, 58));
+      const col = (i: number, v: number) => {
+        if (t < sortDur && (i === h[0] || i === h[1])) return theme.ink;
+        if (sweeping && i <= sw) return theme.successInk;
+        if (usePalette) return pal(theme, Math.floor(((v - 1) / Math.max(1, n)) * theme.accent.length));
+        return hsl((v / n) * 290 + (theme.style === 'blueprint' ? 165 : theme.style === 'oscilloscope' ? 115 : 0), theme.isLight ? 72 : 84, theme.isLight ? 44 : 58);
+      };
       if (view === 'bars') {
         const bw = 960 / n, base = 1440, mh = 930;
         for (let i = 0; i < n; i++) {
@@ -237,9 +247,9 @@ export const buildSorting: Builder = (c, p) => {
           ctx.fill();
         }
       }
-      text(ctx, info.label, 540, 1560, 70, '#ffffff');
-      text(ctx, info.big + '  ·  ' + n + ' elements', 540, 1637, 42, '#ffd166');
-      text(ctx, `${cmpC[s].toLocaleString('en-US')} comparisons · ${wrC[s].toLocaleString('en-US')} writes`, 540, 1705, 34, '#ffffff', { alpha: 0.65, weight: 600 });
+      text(ctx, info.label, 540, 1560, 68, theme.ink);
+      text(ctx, info.big + '  ·  ' + n + ' elements', 540, 1637, 40, theme.accentInk);
+      text(ctx, `${cmpC[s].toLocaleString('en-US')} comparisons · ${wrC[s].toLocaleString('en-US')} writes`, 540, 1705, 34, theme.subInk, { weight: 600 });
     },
   };
 };

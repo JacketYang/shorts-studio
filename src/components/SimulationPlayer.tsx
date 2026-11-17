@@ -131,7 +131,7 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({
       if (ctx.state === 'suspended') {
         void ctx.resume();
       }
-      const key = `${wbBundle.wbSpec.id}:${wbBundle.wbSpec.seed}:${wbBundle.wbSpec.theme}`;
+      const key = `${wbBundle.wbSpec.id}:${wbBundle.wbSpec.seed}:${wbBundle.wbSpec.theme}:${JSON.stringify(wbBundle.wbSpec.params ?? {})}:${wbBundle.scene.duration.toFixed(3)}`;
       let buf = wbAudioBufRef.current?.sceneKey === key ? wbAudioBufRef.current.buffer : null;
       if (!buf) {
         buf = makeAudioBuffer(wbBundle.scene.audio, wbBundle.scene.duration, wbBundle.scene.echo ?? true);
@@ -162,18 +162,34 @@ export const SimulationPlayer: React.FC<SimulationPlayerProps> = ({
       const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = spec.scene.template === 'ball-sort' ? 'triangle' : 'sine';
+      const inst = spec.audio.music?.instrument ?? 'marimba';
+      osc.type =
+        inst === 'pluck' || inst === 'pizzicato' || spec.scene.template === 'ball-sort'
+          ? 'triangle'
+          : inst === 'rhodes'
+            ? 'sine'
+            : inst === 'blip'
+              ? 'square'
+              : 'sine';
       osc.frequency.setValueAtTime(midiToFreq(midi), now);
 
-      const peak = Math.min(0.22, 0.08 + intensity * 0.14);
+      const decay =
+        inst === 'bell' || inst === 'celesta'
+          ? 0.55
+          : inst === 'click' || inst === 'tick'
+            ? 0.08
+            : inst === 'pizzicato'
+              ? 0.22
+              : 0.34;
+      const peak = Math.min(0.22, (inst === 'blip' ? 0.05 : 0.08) + intensity * 0.14);
       gain.gain.setValueAtTime(0.001, now);
-      gain.gain.exponentialRampToValueAtTime(peak, now + 0.008);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      gain.gain.exponentialRampToValueAtTime(peak, now + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + decay);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start(now);
-      osc.stop(now + 0.3);
+      osc.stop(now + decay + 0.03);
     } catch {
       // Ignore browser autoplay restrictions when headless
     }

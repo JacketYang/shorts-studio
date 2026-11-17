@@ -61,6 +61,7 @@ import {
   resolveDbPath,
   runCronTick,
   saveDb,
+  updateSpecCreative,
 } from './src/server/store.ts';
 import {
   addVideoToYoutubePlaylist,
@@ -920,6 +921,18 @@ async function startServer() {
       res.json({ spec: specRec, audit });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : '更新文案失败' });
+    }
+  });
+
+  app.patch('/api/specs/:id/creative', (req, res) => {
+    try {
+      const db = loadDb();
+      const result = updateSpecCreative(db, req.params.id, req.body ?? {});
+      saveDb(db);
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '更新音画配置失败';
+      res.status(msg === 'Spec not found' ? 404 : 400).json({ error: msg });
     }
   });
 

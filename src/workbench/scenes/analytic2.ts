@@ -1,16 +1,31 @@
-import type { AudioEvent, Builder, Ctx } from '../engine/types';
-import { TAU, ambient, ball, clamp, halo, hsl, pentatonic, text } from '../engine/util';
+import type { AudioEvent, Builder, Ctx, Theme } from '../engine/types';
+import { TAU, ambient, ball, clamp, halo, hsl, pal, scaleFreqs, text } from '../engine/util';
 
 const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
 const CX = 540, CY = 880;
 
-function strokePath(ctx: Ctx, xs: ArrayLike<number>, ys: ArrayLike<number>, upto: number, hue0: number, span: number, lw: number, chunk = 36) {
+function strokePath(
+  ctx: Ctx,
+  theme: Theme,
+  xs: ArrayLike<number>,
+  ys: ArrayLike<number>,
+  upto: number,
+  hue0: number,
+  span: number,
+  lw: number,
+  chunk = 36
+) {
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   const M = xs.length;
+  const sat = theme.isLight ? 74 : 88;
+  const lig = theme.isLight ? 42 : 62;
   for (let s = 0; s < upto; s += chunk) {
     const e = Math.min(upto, s + chunk + 1);
-    ctx.strokeStyle = hsl(hue0 + (s / M) * span, 92, 63);
+    ctx.strokeStyle =
+      theme.style === 'paper' || theme.style === 'bauhaus'
+        ? pal(theme, Math.floor((s / Math.max(1, M)) * theme.accent.length))
+        : hsl(hue0 + (s / M) * span, sat, lig);
     ctx.lineWidth = lw;
     ctx.beginPath();
     ctx.moveTo(xs[s], ys[s]);
@@ -19,19 +34,20 @@ function strokePath(ctx: Ctx, xs: ArrayLike<number>, ys: ArrayLike<number>, upto
   }
 }
 
-function musicEvents(times: number[], voice: AudioEvent['voice'], root = 261.63): AudioEvent[] {
-  const sc = pentatonic(root, 10);
+function musicEvents(times: number[], voice: AudioEvent['voice'], root = 261.63, scaleIdx = 0): AudioEvent[] {
+  const sc = scaleFreqs(scaleIdx, root, 10);
   const ev: AudioEvent[] = [];
   times.forEach((t, j) => {
     const m = j % 18;
     const idx = m < 10 ? m : 18 - m;
-    ev.push({ t, f: sc[idx], voice, v: 0.55, pan: ((j % 7) - 3) / 8 });
+    ev.push({ t, f: sc[idx % sc.length], voice, v: 0.55, pan: ((j % 7) - 3) / 8 });
   });
   return ev;
 }
 
 /* ---------- Spirograph (hypotrochoid) & rose curves ---------- */
 export const buildSpiro: Builder = (c, p) => {
+  const theme = c.theme;
   const dur: number = p.dur ?? 24;
   const mode: 'hypo' | 'rose' = p.mode ?? 'hypo';
   const xs: number[] = [], ys: number[] = [];
@@ -55,25 +71,27 @@ export const buildSpiro: Builder = (c, p) => {
     label = `${lobes} petals`;
     deco = (ctx, u) => {
       const t = u * tEnd;
-      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.strokeStyle = theme.muted;
       ctx.lineWidth = 5;
       ctx.beginPath();
       ctx.arc(CX, CY, R * sc, 0, TAU);
       ctx.stroke();
       const gx = CX + sc * (R - r) * Math.cos(t), gy = CY + sc * (R - r) * Math.sin(t);
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.save();
+      ctx.globalAlpha = 0.65;
+      ctx.strokeStyle = theme.subInk;
       ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.arc(gx, gy, r * sc, 0, TAU);
       ctx.stroke();
       const [px, py] = pt(t);
-      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(gx, gy);
       ctx.lineTo(px, py);
       ctx.stroke();
-      ball(ctx, px, py, 13, '#ffffff', 2.4);
+      ctx.restore();
+      ball(ctx, px, py, 13, theme.accentInk, 2.0, theme.isLight);
     };
   } else {
     const nn: number = p.n, d: number = p.dn;
@@ -88,17 +106,20 @@ export const buildSpiro: Builder = (c, p) => {
     label = `${petals} petals`;
     deco = (ctx, u) => {
       const [px, py] = pt(u * thEnd);
-      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = theme.subInk;
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(CX, CY);
       ctx.lineTo(px, py);
       ctx.stroke();
-      ball(ctx, px, py, 13, '#ffffff', 2.4);
+      ctx.restore();
+      ball(ctx, px, py, 13, theme.accentInk, 2.0, theme.isLight);
     };
   }
-  const audio = [...musicEvents(evT, 'marimba', 261.63), { t: 0.1, f: 98, voice: 'pad', d: dur + 2, v: 0.5 } as AudioEvent];
-  void c;
+  const voice: AudioEvent['voice'] = p.voice ?? 'kalimba';
+  const audio = [...musicEvents(evT, voice, 261.63, p.scale ?? 0), { t: 0.1, f: 98, voice: 'pad', d: dur + 2, v: 0.42 } as AudioEvent];
   return {
     duration: dur + 2.8,
     audio,
@@ -106,13 +127,15 @@ export const buildSpiro: Builder = (c, p) => {
       const u = clamp(t / dur, 0, 1);
       const M = xs.length - 1;
       const upto = Math.floor(u * M);
-      strokePath(ctx, xs, ys, upto, t * 14, 420, 11, 36);
-      ctx.globalAlpha = 0.25;
-      strokePath(ctx, xs, ys, upto, t * 14, 420, 26, 60);
-      ctx.globalAlpha = 1;
+      if (!theme.isLight) {
+        ctx.globalAlpha = 0.2;
+        strokePath(ctx, theme, xs, ys, upto, t * 14, 320, 22, 60);
+        ctx.globalAlpha = 1;
+      }
+      strokePath(ctx, theme, xs, ys, upto, t * 14, 320, theme.isLight ? 8 : 10, 36);
       deco(ctx, u);
-      if (u >= 1) text(ctx, label.toUpperCase(), 540, 1560, 90, '#ffffff', { alpha: clamp((t - dur) / 0.6, 0, 1) });
-      else text(ctx, mode === 'hypo' ? `R = ${p.R}   r = ${p.r}` : `r = cos(${p.n}/${p.dn} · θ)`, 540, 1560, 56, '#ffd166');
+      if (u >= 1) text(ctx, label.toUpperCase(), 540, 1560, 86, theme.ink, { alpha: clamp((t - dur) / 0.6, 0, 1) });
+      else text(ctx, mode === 'hypo' ? `R = ${p.R}   r = ${p.r}` : `r = cos(${p.n}/${p.dn} · θ)`, 540, 1560, 52, theme.accentInk);
     },
   };
 };
@@ -121,15 +144,17 @@ export const buildSpiro: Builder = (c, p) => {
 const INTERVALS: Record<string, string> = { '1:2': 'octave', '2:3': 'perfect fifth', '3:4': 'perfect fourth', '4:5': 'major third', '3:5': 'major sixth', '5:6': 'minor third', '5:8': 'minor sixth', '1:3': 'octave + fifth', '4:7': '', '2:5': 'major tenth' };
 
 export const buildLissa: Builder = (c, p) => {
+  const theme = c.theme;
   const a: number = p.a, b: number = p.b;
   const dur: number = p.dur ?? 24;
   const layers: number = p.layers ?? 2;
   const M = 700;
   const key = `${Math.min(a, b)}:${Math.max(a, b)}`;
+  const voice: AudioEvent['voice'] = p.voice ?? 'rhodes';
   const audio = [
-    ...ambient(c.rng, dur + 2, 2.2, 261.63, 'pluck'),
-    { t: 0.2, f: 55 * a, voice: 'pad', d: dur + 2, v: 0.6 } as AudioEvent,
-    { t: 0.2, f: 55 * b, voice: 'pad', d: dur + 2, v: 0.6 } as AudioEvent,
+    ...ambient(c.rng, dur + 2, 2.2, 261.63, voice, p.scale ?? 1),
+    { t: 0.2, f: 55 * a, voice: 'pad', d: dur + 2, v: 0.45 } as AudioEvent,
+    { t: 0.2, f: 55 * b, voice: 'pad', d: dur + 2, v: 0.45 } as AudioEvent,
   ];
   return {
     duration: dur + 1,
@@ -141,15 +166,17 @@ export const buildLissa: Builder = (c, p) => {
         for (let i = 0; i <= M; i++) {
           const th = (i / M) * TAU;
           xs.push(CX + 410 * Math.sin(a * th + delta + L * 0.35));
-          ys.push(CY + 440 * Math.sin(b * th + L * 0.0));
+          ys.push(CY + 440 * Math.sin(b * th));
         }
-        ctx.globalAlpha = 0.18;
-        strokePath(ctx, xs, ys, M, t * 18 + L * 90, 200, 24, 100);
-        ctx.globalAlpha = 1;
-        strokePath(ctx, xs, ys, M, t * 18 + L * 90, 200, 6, 100);
+        if (!theme.isLight) {
+          ctx.globalAlpha = 0.16;
+          strokePath(ctx, theme, xs, ys, M, t * 18 + L * 90, 200, 20, 100);
+          ctx.globalAlpha = 1;
+        }
+        strokePath(ctx, theme, xs, ys, M, t * 18 + L * 90, 200, theme.isLight ? 5.5 : 6, 100);
       }
-      text(ctx, `${a} : ${b}`, 540, 1560, 150, '#ffffff', { alpha: 0.95 });
-      text(ctx, INTERVALS[key] ? `frequency ratio = ${INTERVALS[key]}` : 'frequency ratio', 540, 1670, 42, '#ffd166', { weight: 600 });
+      text(ctx, `${a} : ${b}`, 540, 1560, 145, theme.ink, { alpha: 0.95 });
+      text(ctx, INTERVALS[key] ? `frequency ratio = ${INTERVALS[key]}` : 'frequency ratio', 540, 1670, 40, theme.accentInk, { weight: 600 });
     },
   };
 };
@@ -172,6 +199,7 @@ const SHAPES: Record<string, Shape> = {
 };
 
 export const buildEpicycle: Builder = (c, p) => {
+  const theme = c.theme;
   const dur: number = p.dur ?? 26;
   const keep: number = p.terms ?? 70;
   const shape = SHAPES[p.shape];
@@ -211,7 +239,8 @@ export const buildEpicycle: Builder = (c, p) => {
     return [x, y];
   };
   for (let s = 0; s <= S; s++) { const [x, y] = at(s / S); xs.push(x); ys.push(y); }
-  const audio = ambient(c.rng, dur + 2, 2.4, 261.63, 'bell');
+  const voice: AudioEvent['voice'] = p.voice ?? 'celesta';
+  const audio = ambient(c.rng, dur + 2, 2.4, 261.63, voice, p.scale ?? 2);
   return {
     duration: dur + 3,
     audio,
@@ -220,17 +249,19 @@ export const buildEpicycle: Builder = (c, p) => {
       const upto = Math.floor(u * S);
       const hue = (p.hue ?? 330) as number;
       if (u >= 1) {
-        ctx.globalAlpha = clamp((t - dur) / 1.2, 0, 1) * 0.28;
-        ctx.fillStyle = hsl(hue, 90, 60);
+        ctx.globalAlpha = clamp((t - dur) / 1.2, 0, 1) * (theme.isLight ? 0.16 : 0.24);
+        ctx.fillStyle = theme.accent[0];
         ctx.beginPath();
         xs.forEach((x, i) => (i ? ctx.lineTo(x, ys[i]) : ctx.moveTo(x, ys[i])));
         ctx.fill();
         ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 0.25;
-      strokePath(ctx, xs, ys, upto, hue, 80, 22, 60);
-      ctx.globalAlpha = 1;
-      strokePath(ctx, xs, ys, upto, hue, 80, 7, 36);
+      if (!theme.isLight) {
+        ctx.globalAlpha = 0.22;
+        strokePath(ctx, theme, xs, ys, upto, hue, 80, 18, 60);
+        ctx.globalAlpha = 1;
+      }
+      strokePath(ctx, theme, xs, ys, upto, hue, 80, 7, 36);
       if (u < 1) {
         const chain: [number, number][] = [];
         const [px, py] = at(u, chain);
@@ -238,24 +269,30 @@ export const buildEpicycle: Builder = (c, p) => {
         ctx.lineWidth = 1.5;
         chain.forEach(([x, y], i) => {
           const r = Math.hypot(x - prevX, y - prevY);
-          ctx.strokeStyle = `rgba(255,255,255,${i < 12 ? 0.35 : 0.16})`;
+          ctx.save();
+          ctx.globalAlpha = i < 12 ? 0.45 : 0.2;
+          ctx.strokeStyle = theme.subInk;
           if (r > 2) { ctx.beginPath(); ctx.arc(prevX, prevY, r, 0, TAU); ctx.stroke(); }
           ctx.beginPath();
           ctx.moveTo(prevX, prevY);
           ctx.lineTo(x, y);
           ctx.stroke();
+          ctx.restore();
           prevX = x; prevY = y;
         });
-        ball(ctx, px, py, 12, '#ffffff', 2.5);
-      } else halo(ctx, CX, CY, 520, hsl(hue, 90, 60), 0.12 * clamp((t - dur) / 1.2, 0, 1));
-      text(ctx, `${use.length} rotating circles`, 540, 1600, 58, '#ffffff', { alpha: 0.9 });
-      text(ctx, 'every curve is just circles', 540, 1690, 38, '#ffd166', { weight: 600 });
+        ball(ctx, px, py, 12, theme.accentInk, 2.0, theme.isLight);
+      } else if (!theme.isLight) {
+        halo(ctx, CX, CY, 480, theme.accent[0], 0.1 * clamp((t - dur) / 1.2, 0, 1));
+      }
+      text(ctx, `${use.length} rotating circles`, 540, 1600, 54, theme.ink, { alpha: 0.9 });
+      text(ctx, 'Fourier series reconstruction', 540, 1690, 36, theme.accentInk, { weight: 600 });
     },
   };
 };
 
 /* ---------- Times table on a circle (cardioid → nephroid → ...) ---------- */
-export const buildTimes: Builder = (_c, p) => {
+export const buildTimes: Builder = (c, p) => {
+  const theme = c.theme;
   const N: number = p.n ?? 200;
   const k0 = 2;
   const k1: number = p.k1 ?? 10;
@@ -263,40 +300,48 @@ export const buildTimes: Builder = (_c, p) => {
   const R = 430;
   const P = (i: number): [number, number] => { const a = -Math.PI / 2 + (i / N) * TAU; return [CX + R * Math.cos(a), CY + R * Math.sin(a)]; };
   const audio: AudioEvent[] = [];
-  const sc = pentatonic(261.63, 12);
-  for (let k = 2; k <= k1; k++) audio.push({ t: ((k - k0) / (k1 - k0)) * dur + 0.1, f: sc[(k - 2) % 12], voice: 'bell', v: 0.7 });
-  audio.push({ t: 0.1, f: 98, voice: 'pad', d: dur + 2, v: 0.5 });
-  audio.push({ t: 0.1, f: 147, voice: 'pad', d: dur + 2, v: 0.4 });
-  for (let t = 0.5; t < dur; t += 0.5) audio.push({ t, f: sc[Math.floor(((t / dur) * 20 + (t * 3) % 3)) % 12] * 2, voice: 'blip', v: 0.15 });
+  const sc = scaleFreqs(p.scale ?? 0, 261.63, 12);
+  const voice: AudioEvent['voice'] = p.voice ?? 'celesta';
+  for (let k = 2; k <= k1; k++) audio.push({ t: ((k - k0) / (k1 - k0)) * dur + 0.1, f: sc[(k - 2) % sc.length], voice, v: 0.65 });
+  audio.push({ t: 0.1, f: 98, voice: 'pad', d: dur + 2, v: 0.4 });
+  audio.push({ t: 0.1, f: 147, voice: 'pad', d: dur + 2, v: 0.35 });
+  for (let t = 0.5; t < dur; t += 0.5) audio.push({ t, f: sc[Math.floor(((t / dur) * 20 + (t * 3) % 3)) % sc.length] * 2, voice: 'blip', v: 0.15 });
   return {
     duration: dur + 1.5,
     audio,
     draw(ctx, t) {
       const k = k0 + (k1 - k0) * clamp(t / dur, 0, 1);
-      ctx.lineWidth = 2.2;
+      ctx.lineWidth = 2.0;
+      const usePal = theme.style === 'paper' || theme.style === 'bauhaus';
       for (let i = 0; i < N; i++) {
         const [x0, y0] = P(i);
         const [x1, y1] = P(((k * i) % N + N) % N);
-        ctx.strokeStyle = hsl((i / N) * 360 + t * 12, 90, 62, 0.5);
+        ctx.save();
+        ctx.globalAlpha = theme.isLight ? 0.52 : 0.46;
+        ctx.strokeStyle = usePal
+          ? pal(theme, i)
+          : hsl((i / N) * 320 + t * 12, theme.isLight ? 72 : 84, theme.isLight ? 42 : 62);
         ctx.beginPath();
         ctx.moveTo(x0, y0);
         ctx.lineTo(x1, y1);
         ctx.stroke();
+        ctx.restore();
       }
-      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.strokeStyle = theme.muted;
       ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.arc(CX, CY, R, 0, TAU);
       ctx.stroke();
       const near = Math.abs(k - Math.round(k)) < 0.04;
-      text(ctx, `× ${k.toFixed(2)}`, 540, 1520, 140, '#ffffff');
-      text(ctx, near ? (Math.round(k) === 2 ? 'CARDIOID' : Math.round(k) === 3 ? 'NEPHROID' : `${Math.round(k) - 1} CUSPS`) : `${N} points · each i → k·i`, 540, 1650, 50, near ? '#7CFFB2' : '#ffd166');
+      text(ctx, `× ${k.toFixed(2)}`, 540, 1520, 136, theme.ink);
+      text(ctx, near ? (Math.round(k) === 2 ? 'CARDIOID' : Math.round(k) === 3 ? 'NEPHROID' : `${Math.round(k) - 1} CUSPS`) : `${N} points · i → k·i`, 540, 1650, 48, near ? theme.successInk : theme.accentInk);
     },
   };
 };
 
 /* ---------- Phyllotaxis / golden angle ---------- */
 export const buildPhyllo: Builder = (c, p) => {
+  const theme = c.theme;
   const N: number = p.n ?? 1400;
   const dur: number = p.dur ?? 24;
   const mode: 'grow' | 'sweep' = p.mode ?? 'grow';
@@ -304,11 +349,13 @@ export const buildPhyllo: Builder = (c, p) => {
   const a1: number = p.a1 ?? 137.7;
   const GOLD = 137.50776405;
   const cr = 430 / Math.sqrt(N);
-  const audio = ambient(c.rng, dur + 2, 2.2, 261.63, 'pluck');
+  const voice: AudioEvent['voice'] = p.voice ?? 'pizzicato';
+  const audio = ambient(c.rng, dur + 2, 2.2, 261.63, voice, p.scale ?? 4);
   if (mode === 'grow') {
     let a = 1, b = 2;
-    while (b < N) { audio.push({ t: 0.3 + (b / N) * dur, f: 523.25 * (1 + (b % 5) * 0.12), voice: 'bell', v: 0.8 }); [a, b] = [b, a + b]; }
+    while (b < N) { audio.push({ t: 0.3 + (b / N) * dur, f: 523.25 * (1 + (b % 5) * 0.12), voice: 'celesta', v: 0.72 }); [a, b] = [b, a + b]; }
   }
+  const usePal = theme.style === 'paper' || theme.style === 'bauhaus';
   return {
     duration: dur + 2.5,
     audio,
@@ -321,17 +368,19 @@ export const buildPhyllo: Builder = (c, p) => {
         const r = cr * Math.sqrt(n);
         const th = n * ar;
         const rad = 2.2 + 5.5 * Math.sqrt(n / N);
-        ctx.fillStyle = hsl(n * 0.28 + t * 18, 90, 60);
+        ctx.fillStyle = usePal
+          ? pal(theme, Math.floor((n / 34) % theme.accent.length))
+          : hsl(n * 0.28 + t * 18, theme.isLight ? 72 : 86, theme.isLight ? 42 : 60);
         ctx.beginPath();
         ctx.arc(CX + r * Math.cos(th), CY + r * Math.sin(th), rad, 0, TAU);
         ctx.fill();
       }
       if (mode === 'grow') {
-        text(ctx, String(nVis), 540, 1520, 130, '#ffffff');
-        text(ctx, 'seeds · each turned 137.508°', 540, 1640, 46, '#ffd166');
+        text(ctx, String(nVis), 540, 1520, 126, theme.ink);
+        text(ctx, 'seeds · 137.508° golden step', 540, 1640, 44, theme.accentInk);
       } else {
-        text(ctx, `${alpha.toFixed(3)}°`, 540, 1520, 130, '#ffffff');
-        text(ctx, Math.abs(alpha - GOLD) < 0.03 ? 'THE GOLDEN ANGLE' : 'angle between seeds', 540, 1640, 50, Math.abs(alpha - GOLD) < 0.03 ? '#7CFFB2' : '#ffd166');
+        text(ctx, `${alpha.toFixed(3)}°`, 540, 1520, 126, theme.ink);
+        text(ctx, Math.abs(alpha - GOLD) < 0.03 ? 'THE GOLDEN ANGLE' : 'angle between seeds', 540, 1640, 48, Math.abs(alpha - GOLD) < 0.03 ? theme.successInk : theme.accentInk);
       }
     },
   };

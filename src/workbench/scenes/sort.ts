@@ -1,11 +1,12 @@
 import type { AudioEvent, BuildCtx, Builder, Scene } from '../engine/types';
-import { TAU, ball, clamp, halo, lastLE, mulberry32, pentatonic, rrect, text } from '../engine/util';
+import { TAU, ball, clamp, halo, lastLE, mulberry32, pal, rrect, scaleFreqs, text } from '../engine/util';
 
-const BIN_COLORS = ['#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#b794f6', '#ff9e00'];
+type PegLayout = 'grid' | 'stagger' | 'funnel' | 'diamond';
 
 /* Plinko-style ball sorter with real peg physics + colour-guided beams */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
+  const theme = c.theme;
   const n: number = p.balls ?? 16;
   const nb: number = p.bins ?? 4;
   const rng = c.rng;
@@ -16,10 +17,25 @@ function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
   const bTop = 1300, floorY = 1500, bw = 880 / nb;
   const pegs: [number, number][] = [];
   const rows = p.rows ?? 7;
+  const pegLayout = (p.pegLayout ?? 'stagger') as PegLayout;
+
   for (let r = 0; r < rows; r++) {
-    const off = r % 2 ? 55 : 0;
-    for (let x = 90 + off; x <= 990; x += 110) pegs.push([x, 560 + r * 90]);
+    const y = 560 + r * 90;
+    if (pegLayout === 'grid') {
+      for (let x = 115; x <= 965; x += 110) pegs.push([x, y]);
+    } else if (pegLayout === 'funnel') {
+      const margin = Math.abs(r - (rows - 1) / 2) * 58;
+      for (let x = 90 + margin; x <= 990 - margin; x += 110) pegs.push([x, y]);
+    } else if (pegLayout === 'diamond') {
+      const halfSpan = 160 + (rows / 2 - Math.abs(r - (rows - 1) / 2)) * 92;
+      for (let x = Math.max(95, 540 - halfSpan); x <= Math.min(985, 540 + halfSpan); x += 108) pegs.push([x, y]);
+    } else {
+      const off = r % 2 ? 55 : 0;
+      for (let x = 90 + off; x <= 990; x += 110) pegs.push([x, y]);
+    }
   }
+
+  const binCols = Array.from({ length: nb }, (_, b) => pal(theme, b));
   const colors = Array.from({ length: n }, (_, i) => i % nb);
   for (let i = n - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [colors[i], colors[j]] = [colors[j], colors[i]]; }
   const order = Array.from({ length: n }, (_, i) => i);
@@ -28,12 +44,14 @@ function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
   const keys = colors.map((cl) => cl + (rng() - 0.5) * nb * 1.1);
   const slotOrder = keys.map((_, i) => i).sort((a, b) => keys[a] - keys[b]);
   const slotOf = new Array(n).fill(0);
-  slotOrder.forEach((ball, k) => { slotOf[ball] = k; });
+  slotOrder.forEach((bIdx, k) => { slotOf[bIdx] = k; });
   const x = Array.from({ length: n }, (_, i) => 90 + (slotOf[i] + 0.5) * (900 / n));
   const y = new Array(n).fill(420);
   const vx = new Array(n).fill(0), vy = new Array(n).fill(0);
   const landed = new Array(n).fill(false);
-  const scale = pentatonic(293.66, 12);
+  const scaleIdx: number = p.scale ?? 0;
+  const voice: AudioEvent['voice'] = p.voice ?? 'marimba';
+  const scale = scaleFreqs(scaleIdx, 293.66, 14);
   const audio: AudioEvent[] = [];
   const frames: Float32Array[] = [];
   const landedAt: number[] = [];
@@ -79,7 +97,7 @@ function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
             if (-vn > 140 && t - lastHit[i] > 0.04) {
               lastHit[i] = t;
               const col = Math.round((px - 90) / 55);
-              audio.push({ t, f: scale[clamp(col, 0, 11)], voice: 'marimba', v: clamp(-vn / 900, 0.12, 0.6), pan: (px - 540) / 600 });
+              audio.push({ t, f: scale[clamp(col, 0, scale.length - 1)], voice, v: clamp(-vn / 900, 0.12, 0.6), pan: (px - 540) / 600 });
             }
           }
         }
@@ -110,8 +128,8 @@ function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
         landed[i] = true;
         cnt++;
         landedAt.push(t);
-        audio.push({ t, f: scale[colors[i] * 2 + 2], voice: 'bell', v: 0.7, pan: (x[i] - 540) / 600 });
-        audio.push({ t, f: 110, voice: 'thud', v: 0.5 });
+        audio.push({ t, f: scale[colors[i] * 2 + 2], voice: 'celesta', v: 0.7, pan: (x[i] - 540) / 600 });
+        audio.push({ t, f: 110, voice: 'thud', v: 0.45 });
         if (cnt === n) tAll = t;
       }
     }
@@ -137,7 +155,7 @@ function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
   const ok = cnt === n && colors.every((cl, i) => Math.floor((x[i] - 100) / bw) === cl && y[i] > 1300);
   const duration = tAll > 0 ? Math.min(total, tAll + 2.4) : total;
   const chord = [0, 2, 4, 6].map((k) => scale[k + 2] * 2);
-  chord.forEach((f, k) => audio.push({ t: (tAll > 0 ? tAll : total - 2) + 0.6 + k * 0.08, f, voice: 'bell', v: 0.6 }));
+  chord.forEach((f, k) => audio.push({ t: (tAll > 0 ? tAll : total - 2) + 0.6 + k * 0.08, f, voice: 'celesta', v: 0.55 }));
   const scene: Scene = {
     duration,
     audio,
@@ -145,36 +163,45 @@ function plinkoOnce(c: BuildCtx, p: any): { scene: Scene; ok: boolean } {
       const f = clamp(Math.floor(t * 60), 0, frames.length - 1);
       const cur = frames[f];
       for (let b = 0; b < nb; b++) {
-        const g = ctx.createLinearGradient(0, 640, 0, bTop);
-        g.addColorStop(0, BIN_COLORS[b] + '00');
-        g.addColorStop(1, BIN_COLORS[b] + '55');
-        ctx.strokeStyle = g;
-        ctx.lineWidth = 16;
+        ctx.save();
+        ctx.globalAlpha = theme.isLight ? 0.14 : 0.2;
+        ctx.strokeStyle = binCols[b];
+        ctx.lineWidth = 14;
         ctx.beginPath();
         ctx.moveTo(540, 640);
         ctx.bezierCurveTo(540, 1000, binX(b), 1000, binX(b), bTop);
         ctx.stroke();
+        ctx.restore();
       }
-      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.fillStyle = theme.ink;
+      ctx.save();
+      ctx.globalAlpha = theme.isLight ? 0.72 : 0.8;
       for (const [px, py] of pegs) { ctx.beginPath(); ctx.arc(px, py, pr, 0, TAU); ctx.fill(); }
-      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.restore();
+      ctx.fillStyle = theme.muted;
       rrect(ctx, 70, 420 + R + 4, 940, 10, 5);
       ctx.fill();
       for (let b = 0; b < nb; b++) {
-        ctx.fillStyle = BIN_COLORS[b] + '22';
+        ctx.save();
+        ctx.globalAlpha = theme.isLight ? 0.12 : 0.18;
+        ctx.fillStyle = binCols[b];
         rrect(ctx, 100 + b * bw + 6, bTop, bw - 12, floorY - bTop + 6, 14);
         ctx.fill();
-        ctx.strokeStyle = BIN_COLORS[b];
+        ctx.restore();
+        ctx.strokeStyle = binCols[b];
         ctx.lineWidth = 5;
+        rrect(ctx, 100 + b * bw + 6, bTop, bw - 12, floorY - bTop + 6, 14);
         ctx.stroke();
       }
       const lk = lastLE(landedAt, t);
-      if (lk >= 0 && t - landedAt[lk] < 0.4) halo(ctx, 540, 1400, 500, '#ffffff', 0.12 * (1 - (t - landedAt[lk]) / 0.4));
-      for (let i = 0; i < n; i++) ball(ctx, cur[i * 2], cur[i * 2 + 1], R, BIN_COLORS[colors[i]], 1.6);
+      if (!theme.isLight && lk >= 0 && t - landedAt[lk] < 0.4) {
+        halo(ctx, 540, 1400, 460, theme.ink, 0.1 * (1 - (t - landedAt[lk]) / 0.4));
+      }
+      for (let i = 0; i < n; i++) ball(ctx, cur[i * 2], cur[i * 2 + 1], R, binCols[colors[i]], 1.4, theme.isLight);
       const done = cur[n * 2];
-      const ok = done === n && tAll > 0 && t > tAll + 0.5;
-      text(ctx, ok ? '✓ ALL SORTED' : `${done} / ${n} SORTED`, 540, 1620, 66, ok ? '#7CFFB2' : '#ffffff');
-      text(ctx, `${n} balls · ${nb} bins · zero mistakes`, 540, 1700, 38, '#ffffff', { alpha: 0.6, weight: 600 });
+      const allDone = done === n && tAll > 0 && t > tAll + 0.5;
+      text(ctx, allDone ? '✓ ALL SORTED' : `${done} / ${n} SORTED`, 540, 1620, 62, allDone ? theme.successInk : theme.ink);
+      text(ctx, `${n} spheres · ${nb} bins · ${pegLayout} matrix`, 540, 1700, 36, theme.subInk, { weight: 600 });
     },
   };
   return { scene, ok };

@@ -1,10 +1,11 @@
-import type { AudioEvent, Builder, Ctx } from '../engine/types';
-import { TAU, ambient, ball, clamp, halo, hsl, lastLE, lerp, pentatonic, rrect, text } from '../engine/util';
+import type { AudioEvent, Builder, Ctx, Theme } from '../engine/types';
+import { TAU, ambient, ball, clamp, halo, hsl, lastLE, lerp, pal, rrect, scaleFreqs, seriesColor, text } from '../engine/util';
 
 const CX = 540;
 
 /* ---------- Double pendulums with nearly identical starts ---------- */
 export const buildDPend: Builder = (c, p) => {
+  const theme = c.theme;
   const N: number = p.n ?? 40;
   const dur: number = p.dur ?? 30;
   const mode: 'lines' | 'tips' = p.mode ?? 'lines';
@@ -48,8 +49,9 @@ export const buildDPend: Builder = (c, p) => {
       w2[i] += (dt / 6) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
     }
   }
-  const audio = ambient(c.rng, dur + 1, 2.0, 220, 'bell');
-  const deg = ((eps * 180) / Math.PI);
+  const voice: AudioEvent['voice'] = p.voice ?? 'rhodes';
+  const audio = ambient(c.rng, dur + 1, 2.0, 220, voice, p.scale ?? 3);
+  const deg = (eps * 180) / Math.PI;
   return {
     duration: dur + 1,
     audio,
@@ -61,17 +63,23 @@ export const buildDPend: Builder = (c, p) => {
       if (mode === 'lines') {
         ctx.lineWidth = 4;
         for (let i = 0; i < N; i++) {
-          ctx.strokeStyle = hsl((i / N) * 300, 90, 62, 0.4);
+          ctx.save();
+          ctx.globalAlpha = theme.isLight ? 0.48 : 0.4;
+          ctx.strokeStyle = seriesColor(theme, i, N);
           ctx.beginPath();
           ctx.moveTo(CX, PY);
           ctx.lineTo(cur[i * 4], cur[i * 4 + 1]);
           ctx.lineTo(cur[i * 4 + 2], cur[i * 4 + 3]);
           ctx.stroke();
+          ctx.restore();
         }
       }
       const tl = mode === 'tips' ? 70 : 26;
       for (let i = 0; i < N; i++) {
-        ctx.strokeStyle = hsl((i / N) * 300, 95, 65, mode === 'tips' ? 0.6 : 0.45);
+        const col = seriesColor(theme, i, N);
+        ctx.save();
+        ctx.globalAlpha = mode === 'tips' ? 0.65 : 0.45;
+        ctx.strokeStyle = col;
         ctx.lineWidth = mode === 'tips' ? 4 : 3;
         ctx.beginPath();
         const f0 = Math.max(0, f - tl);
@@ -80,21 +88,23 @@ export const buildDPend: Builder = (c, p) => {
           if (k === f0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
-        ball(ctx, cur[i * 4 + 2], cur[i * 4 + 3], mode === 'tips' ? 10 : 8, hsl((i / N) * 300, 90, 64), 1.5);
+        ctx.restore();
+        ball(ctx, cur[i * 4 + 2], cur[i * 4 + 3], mode === 'tips' ? 10 : 8, col, 1.4, theme.isLight);
       }
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = theme.ink;
       ctx.beginPath();
       ctx.arc(CX, PY, 9, 0, TAU);
       ctx.fill();
-      text(ctx, `${N} double pendulums`, 540, 1520, 66, '#ffffff');
-      text(ctx, `start difference: ${deg < 0.001 ? deg.toExponential(1) : deg.toFixed(4)}° each`, 540, 1612, 40, '#ffd166', { weight: 600 });
-      text(ctx, `${t.toFixed(1)} s`, 540, 1700, 56, '#ffffff', { alpha: 0.7 });
+      text(ctx, `${N} double pendulums`, 540, 1520, 62, theme.ink);
+      text(ctx, `start difference: ${deg < 0.001 ? deg.toExponential(1) : deg.toFixed(4)}° each`, 540, 1612, 38, theme.accentInk, { weight: 600 });
+      text(ctx, `${t.toFixed(1)} s`, 540, 1700, 52, theme.subInk);
     },
   };
 };
 
 /* ---------- Lorenz attractor butterflies ---------- */
 export const buildLorenz: Builder = (c, p) => {
+  const theme = c.theme;
   const N: number = p.n ?? 10;
   const dur: number = p.dur ?? 28;
   const sps = 240;
@@ -103,7 +113,8 @@ export const buildLorenz: Builder = (c, p) => {
   const X: Float32Array[] = [], Y: Float32Array[] = [], Z: Float32Array[] = [];
   const f = (x: number, y: number, z: number): [number, number, number] => [sig * (y - x), x * (rho - z) - y, x * y - beta * z];
   const audio: AudioEvent[] = [];
-  const sc = pentatonic(220, 15);
+  const sc = scaleFreqs(p.scale ?? 1, 220, 15);
+  const voice: AudioEvent['voice'] = p.voice ?? 'kalimba';
   for (let i = 0; i < N; i++) {
     let x = 1 + i * (p.eps ?? 2e-4), y = 1, z = 1;
     const xa = new Float32Array(total), ya = new Float32Array(total), za = new Float32Array(total);
@@ -117,12 +128,11 @@ export const buildLorenz: Builder = (c, p) => {
       y += (dt / 6) * (a[1] + 2 * b[1] + 2 * cc[1] + d[1]);
       z += (dt / 6) * (a[2] + 2 * b[2] + 2 * cc[2] + d[2]);
       if (i === 0 && s > 0 && Math.sign(xa[s]) !== Math.sign(xa[s - 1]))
-        audio.push({ t: s / sps, f: sc[clamp(Math.floor(za[s] / 4), 0, 14)], voice: 'marimba', v: 0.8, pan: xa[s] / 40 });
+        audio.push({ t: s / sps, f: sc[clamp(Math.floor(za[s] / 4), 0, sc.length - 1)], voice, v: 0.78, pan: xa[s] / 40 });
     }
     X.push(xa); Y.push(ya); Z.push(za);
   }
-  audio.push({ t: 0.1, f: 110, voice: 'pad', d: dur, v: 0.5 });
-  void c;
+  audio.push({ t: 0.1, f: 110, voice: 'pad', d: dur, v: 0.42 });
   return {
     duration: dur,
     audio,
@@ -135,11 +145,13 @@ export const buildLorenz: Builder = (c, p) => {
       ctx.lineJoin = 'round';
       const tl = 420;
       for (let i = 0; i < N; i++) {
-        const hue = (i / N) * 280 + 10;
+        const col = seriesColor(theme, i, N);
         const s0 = Math.max(0, idx - tl);
         for (let seg = 0; seg < 6; seg++) {
           const a = s0 + Math.floor(((idx - s0) * seg) / 6), b = s0 + Math.floor(((idx - s0) * (seg + 1)) / 6);
-          ctx.strokeStyle = hsl(hue, 92, 62, 0.12 + 0.75 * ((seg + 1) / 6));
+          ctx.save();
+          ctx.globalAlpha = (theme.isLight ? 0.22 : 0.14) + 0.72 * ((seg + 1) / 6);
+          ctx.strokeStyle = col;
           ctx.lineWidth = 2 + seg * 0.7;
           ctx.beginPath();
           for (let s = a; s <= b; s += 2) {
@@ -147,18 +159,20 @@ export const buildLorenz: Builder = (c, p) => {
             if (s === a) ctx.moveTo(px, py); else ctx.lineTo(px, py);
           }
           ctx.stroke();
+          ctx.restore();
         }
         const [hx, hy] = proj(X[i][idx], Y[i][idx], Z[i][idx]);
-        ball(ctx, hx, hy, 9, hsl(hue, 90, 66), 1.8);
+        ball(ctx, hx, hy, 9, col, 1.6, theme.isLight);
       }
-      text(ctx, `${N} copies · start apart by 0.0002`, 540, 1560, 48, '#ffffff');
-      text(ctx, 'the Lorenz attractor · chaos', 540, 1650, 40, '#ffd166', { weight: 600 });
+      text(ctx, `${N} copies · start apart by 0.0002`, 540, 1560, 46, theme.ink);
+      text(ctx, 'the Lorenz attractor · chaos', 540, 1650, 38, theme.accentInk, { weight: 600 });
     },
   };
 };
 
 /* ---------- Galton board ---------- */
 export const buildGalton: Builder = (c, p) => {
+  const theme = c.theme;
   const rows: number = p.rows ?? 12;
   const B: number = p.balls ?? 250;
   const rng = c.rng;
@@ -167,7 +181,8 @@ export const buildGalton: Builder = (c, p) => {
   const pegY = (r: number) => pegY0 + r * rowH;
   const binX = (k: number) => CX + (k - rows / 2) * dx;
   const cnt = new Array(rows + 1).fill(0);
-  const sc = pentatonic(392, 12);
+  const sc = scaleFreqs(p.scale ?? 0, 392, 12);
+  const voice: AudioEvent['voice'] = p.voice ?? 'tick';
   interface Ball { tRel: number; js: number[]; bin: number; tLand: number; ex: number; ey: number; hit0: number }
   const balls: Ball[] = [];
   const audio: AudioEvent[] = [];
@@ -188,15 +203,14 @@ export const buildGalton: Builder = (c, p) => {
     const lastY = pegY(rows - 1) - pr - rad;
     const tLand = lastHit + Math.sqrt((2 * Math.max(10, ey - lastY)) / 3500) + 0.04;
     balls.push({ tRel, js, bin, tLand, ex, ey, hit0 });
-    for (let r = 0; r < rows; r += 2) audio.push({ t: hit0 + r * ballTau, f: sc[(js[r] + r) % 12], voice: 'tick', v: 0.1, pan: (pegX(r, js[r]) - CX) / 500 });
-    audio.push({ t: tLand, f: 520 + bin * 40, voice: 'tick', v: 0.14 });
+    for (let r = 0; r < rows; r += 2) audio.push({ t: hit0 + r * ballTau, f: sc[(js[r] + r) % sc.length], voice, v: 0.1, pan: (pegX(r, js[r]) - CX) / 500 });
+    audio.push({ t: tLand, f: 520 + bin * 40, voice, v: 0.14 });
     tRel += Math.max(0.025, 0.35 * Math.pow(0.955, i));
   }
   const tEnd = Math.max(...balls.map((b) => b.tLand));
-  audio.push({ t: 0.1, f: 98, voice: 'pad', d: tEnd + 3, v: 0.4 });
+  audio.push({ t: 0.1, f: 98, voice: 'pad', d: tEnd + 3, v: 0.35 });
   const binom = (n: number, k: number) => { let r = 1; for (let i = 1; i <= k; i++) r = (r * (n - k + i)) / i; return r; };
   const landedT = balls.map((b) => b.tLand).sort((a, b) => a - b);
-  const hueOf = (k: number) => 10 + (k / rows) * 280;
   const pos = (b: Ball, t: number): [number, number] => {
     const topX = CX, topY = 430;
     const p0y = pegY(0) - pr - rad;
@@ -218,9 +232,12 @@ export const buildGalton: Builder = (c, p) => {
     audio,
     echo: false,
     draw(ctx, t) {
-      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.save();
+      ctx.globalAlpha = 0.72;
+      ctx.fillStyle = theme.ink;
       for (let r = 0; r < rows; r++) for (let j = 0; j <= r; j++) { ctx.beginPath(); ctx.arc(pegX(r, j), pegY(r), pr, 0, TAU); ctx.fill(); }
-      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.restore();
+      ctx.strokeStyle = theme.muted;
       ctx.lineWidth = 3;
       for (let k = 0; k <= rows + 1; k++) {
         const x = CX + (k - 0.5 - rows / 2) * dx;
@@ -238,15 +255,17 @@ export const buildGalton: Builder = (c, p) => {
         if (t < b.tRel) continue;
         released++;
         const [x, y] = pos(b, t);
-        ctx.fillStyle = hsl(hueOf(b.bin), 90, 62);
+        ctx.fillStyle = seriesColor(theme, b.bin, rows + 1);
         ctx.beginPath();
         ctx.arc(x, y, rad, 0, TAU);
         ctx.fill();
       }
       const a = clamp((t - (tEnd - 0.5)) / 1.5, 0, 1);
       if (a > 0) {
+        ctx.save();
+        ctx.globalAlpha = 0.85 * a;
         ctx.setLineDash([14, 12]);
-        ctx.strokeStyle = `rgba(255,255,255,${0.85 * a})`;
+        ctx.strokeStyle = theme.ink;
         ctx.lineWidth = 5;
         ctx.beginPath();
         for (let k = 0; k <= rows; k++) {
@@ -257,17 +276,17 @@ export const buildGalton: Builder = (c, p) => {
         }
         ctx.stroke();
         ctx.setLineDash([]);
+        ctx.restore();
       }
       const landed = lastLE(landedT, t) + 1;
-      text(ctx, String(Math.min(released, B)), 540, 1560, 100, '#ffffff');
-      text(ctx, a > 0.6 ? 'THE BELL CURVE EMERGES' : `${landed} landed · ${rows} rows of pegs`, 540, 1670, a > 0.6 ? 52 : 40, a > 0.6 ? '#7CFFB2' : '#ffd166');
+      text(ctx, String(Math.min(released, B)), 540, 1560, 96, theme.ink);
+      text(ctx, a > 0.6 ? 'THE BELL CURVE EMERGES' : `${landed} landed · ${rows} rows of pegs`, 540, 1670, a > 0.6 ? 50 : 38, a > 0.6 ? theme.successInk : theme.accentInk);
     },
   };
 };
 
 /* ---------- Races: brachistochrone & tautochrone ---------- */
 const CURVE_NAMES: Record<string, string> = { line: 'Straight line', cycloid: 'Cycloid', steep: 'Steep, then flat', sag: 'Flat, then steep', arc: 'Circular dip', parab: 'Parabola' };
-const CURVE_COL: Record<string, string> = { line: '#ff6b6b', cycloid: '#ffd166', steep: '#06d6a0', sag: '#4cc9f0', arc: '#c77dff', parab: '#ff9e00' };
 
 function solveCycloid(ratio: number) {
   let lo = 0.01, hi = TAU;
@@ -279,8 +298,8 @@ function solveCycloid(ratio: number) {
   return (lo + hi) / 2;
 }
 
-function raceBrachi(c: { rng: () => number }, p: { curves: string[]; drop?: number; tCyc?: number }) {
-  void c;
+function raceBrachi(c: { theme: Theme; rng: () => number }, p: { curves: string[]; drop?: number; tCyc?: number; voice?: AudioEvent['voice'] }) {
+  const theme = c.theme;
   const A: [number, number] = [130, 680];
   const dx = 820, dy = (p.drop ?? 0.45) * dx;
   const Bp: [number, number] = [A[0] + dx, A[1] + dy];
@@ -315,55 +334,60 @@ function raceBrachi(c: { rng: () => number }, p: { curves: string[]; drop?: numb
   const rank = fin.map((f, i) => fin.filter((g) => g < f).length + 0 * i);
   const audio: AudioEvent[] = [{ t: 0.9, f: 130, voice: 'thud', v: 0.8 }];
   const nt = [523.25, 440, 392, 329.63, 293.66, 261.63];
-  fin.forEach((f, i) => audio.push({ t: f, f: nt[rank[i]] ?? 261.63, voice: 'bell', v: 0.8 }));
+  const voice: AudioEvent['voice'] = p.voice ?? 'celesta';
+  fin.forEach((f, i) => audio.push({ t: f, f: nt[rank[i]] ?? 261.63, voice, v: 0.8 }));
   const endT = Math.max(...fin) + 3;
+  const colOf = (i: number) => pal(theme, i);
   return {
     duration: endT,
     audio,
     draw(ctx: Ctx, t: number) {
-      curves.forEach((nm, i) => {
+      curves.forEach((_nm, i) => {
         const r = raw[i];
-        ctx.strokeStyle = CURVE_COL[nm] + '88';
+        ctx.save();
+        ctx.globalAlpha = 0.72;
+        ctx.strokeStyle = colOf(i);
         ctx.lineWidth = 7;
         ctx.lineCap = 'round';
         ctx.beginPath();
         r.xs.forEach((x, k) => (k ? ctx.lineTo(x, r.ys[k]) : ctx.moveTo(x, r.ys[k])));
         ctx.stroke();
+        ctx.restore();
       });
-      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.strokeStyle = theme.ink;
       ctx.lineWidth = 6;
       ctx.beginPath();
       ctx.moveTo(Bp[0] + 36, Bp[1] - 90);
       ctx.lineTo(Bp[0] + 36, Bp[1] + 40);
       ctx.stroke();
-      text(ctx, 'START', A[0], A[1] - 60, 30, '#ffffff', { alpha: 0.8 });
-      text(ctx, 'FINISH', Bp[0] + 36, Bp[1] - 118, 30, '#ffffff', { alpha: 0.8 });
+      text(ctx, 'START', A[0], A[1] - 60, 28, theme.subInk);
+      text(ctx, 'FINISH', Bp[0] + 36, Bp[1] - 118, 28, theme.subInk);
       const ts = t - 1.0;
-      curves.forEach((nm, i) => {
+      curves.forEach((_nm, i) => {
         const r = raw[i];
         const k = ts <= 0 ? 0 : Math.min(M, lastLE(r.T, ts));
         const s = k >= M ? 0 : (ts - r.T[k]) / (r.T[k + 1] - r.T[k]);
         const x = lerp(r.xs[k], r.xs[Math.min(M, k + 1)], clamp(s, 0, 1));
         const y = lerp(r.ys[k], r.ys[Math.min(M, k + 1)], clamp(s, 0, 1));
-        ball(ctx, x, y - 22, 22, CURVE_COL[nm], 2);
+        ball(ctx, x, y - 22, 22, colOf(i), 1.8, theme.isLight);
       });
       const order = curves.map((_, i) => i).sort((a, b) => fin[a] - fin[b]);
       order.forEach((i, row) => {
         const y = 1420 + row * 56;
         const done = t >= fin[i];
-        ctx.fillStyle = CURVE_COL[curves[i]];
+        ctx.fillStyle = colOf(i);
         ctx.beginPath();
         ctx.arc(190, y, 15, 0, TAU);
         ctx.fill();
-        text(ctx, CURVE_NAMES[curves[i]], 225, y, 38, '#ffffff', { align: 'left', alpha: done ? 1 : 0.45, weight: 700 });
-        text(ctx, done ? `#${rank[i] + 1}  ${(fin[i] - 1).toFixed(2)} s` : '…', 900, y, 38, done ? '#ffd166' : '#ffffff', { align: 'right', alpha: done ? 1 : 0.3 });
+        text(ctx, CURVE_NAMES[curves[i]], 225, y, 36, theme.ink, { align: 'left', alpha: done ? 1 : 0.45, weight: 700 });
+        text(ctx, done ? `#${rank[i] + 1}  ${(fin[i] - 1).toFixed(2)} s` : '…', 900, y, 36, done ? theme.accentInk : theme.subInk, { align: 'right', alpha: done ? 1 : 0.4 });
       });
     },
   };
 }
 
-function raceTauto(c: { rng: () => number }, p: { n?: number }) {
-  void c;
+function raceTauto(c: { theme: Theme; rng: () => number }, p: { n?: number; scale?: number; voice?: AudioEvent['voice'] }) {
+  const theme = c.theme;
   const N = p.n ?? 8;
   const Tp = 4.0;
   const t0 = 1.6;
@@ -391,10 +415,11 @@ function raceTauto(c: { rng: () => number }, p: { n?: number }) {
     }
   }
   const audio: AudioEvent[] = [];
-  const sc = pentatonic(261.63, 5);
+  const sc = scaleFreqs(p.scale ?? 0, 261.63, 5);
+  const voice: AudioEvent['voice'] = p.voice ?? 'celesta';
   for (let k = 0; k < 6; k++) {
     const t = t0 + Tp / 4 + k * (Tp / 2);
-    sc.forEach((f, j) => audio.push({ t: t + j * 0.015, f: f * (j < 3 ? 1 : 0.5), voice: 'bell', v: 0.45, pan: (j - 2) / 4 }));
+    sc.forEach((f, j) => audio.push({ t: t + j * 0.015, f: f * (j < 3 ? 1 : 0.5), voice, v: 0.45, pan: (j - 2) / 4 }));
   }
   audio.push({ t: 0.1, f: 98, voice: 'pad', d: dur, v: 0.35 });
   const cycPos = (i: number, ts: number): [number, number] => {
@@ -403,13 +428,17 @@ function raceTauto(c: { rng: () => number }, p: { n?: number }) {
     const th2 = 2 * Math.asin(clamp(s / (4 * rC), -1, 1));
     return [CX + rC * (th2 + Math.sin(th2)), topC + rC * (1 + Math.cos(th2))];
   };
+  const cycTrackCol = theme.accent[0];
+  const arcTrackCol = theme.accent[1] ?? theme.accent[2];
   return {
     duration: dur,
     audio,
     draw(ctx: Ctx, t: number) {
       const ts = t - t0;
       ctx.lineCap = 'round';
-      ctx.strokeStyle = '#ffd166aa';
+      ctx.save();
+      ctx.globalAlpha = 0.72;
+      ctx.strokeStyle = cycTrackCol;
       ctx.lineWidth = 8;
       ctx.beginPath();
       for (let i = -100; i <= 100; i++) {
@@ -418,7 +447,7 @@ function raceTauto(c: { rng: () => number }, p: { n?: number }) {
         if (i === -100) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
-      ctx.strokeStyle = '#4cc9f0aa';
+      ctx.strokeStyle = arcTrackCol;
       ctx.beginPath();
       const pm = Math.asin(440 / Lc);
       for (let i = -100; i <= 100; i++) {
@@ -427,28 +456,32 @@ function raceTauto(c: { rng: () => number }, p: { n?: number }) {
         if (i === -100) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      ctx.restore();
       const flash = (kk: number) => clamp(1 - Math.abs(ts - (Tp / 4 + kk * (Tp / 2))) / 0.25, 0, 1);
       let fl = 0;
       for (let k = 0; k < 6; k++) fl = Math.max(fl, flash(k));
       if (fl > 0) {
-        ctx.strokeStyle = `rgba(255,255,255,${0.8 * fl})`;
+        ctx.save();
+        ctx.globalAlpha = 0.75 * fl;
+        ctx.strokeStyle = theme.successInk;
         ctx.lineWidth = 6;
         ctx.beginPath();
         ctx.moveTo(CX, topC + 2 * rC + 30);
         ctx.lineTo(CX, topC - 30);
         ctx.stroke();
+        ctx.restore();
       }
       const af = clamp(Math.floor(Math.max(0, ts) * 60), 0, arc.length - 1);
       for (let i = 0; i < N; i++) {
-        const hue = (i / (N - 1)) * 300;
+        const col = seriesColor(theme, i, N);
         const [x, y] = cycPos(i, ts);
-        ball(ctx, x, y - 20, 20, hsl(hue, 90, 62), 2);
+        ball(ctx, x, y - 20, 20, col, 1.8, theme.isLight);
         const a = ts <= 0 ? phi0[i] : arc[af][i];
-        ball(ctx, CX + Lc * Math.sin(a), arcCY + Lc * Math.cos(a) - 20, 20, hsl(hue, 90, 62), 2);
+        ball(ctx, CX + Lc * Math.sin(a), arcCY + Lc * Math.cos(a) - 20, 20, col, 1.8, theme.isLight);
       }
-      text(ctx, 'CYCLOID BOWL · all arrive together', 540, 880, 40, '#ffd166');
-      text(ctx, 'CIRCULAR BOWL · they drift apart', 540, 1385, 40, '#4cc9f0');
-      text(ctx, ts < 0 ? 'release from different heights…' : 'same time, any height', 540, 1520, 52, '#ffffff', { alpha: 0.9 });
+      text(ctx, 'CYCLOID BOWL · all arrive together', 540, 880, 38, theme.accentInk);
+      text(ctx, 'CIRCULAR BOWL · they drift apart', 540, 1385, 38, theme.subInk);
+      text(ctx, ts < 0 ? 'release from different heights…' : 'same time, any height', 540, 1520, 50, theme.ink, { alpha: 0.9 });
     },
   };
 }
@@ -456,7 +489,8 @@ function raceTauto(c: { rng: () => number }, p: { n?: number }) {
 export const buildRace: Builder = (c, p) => (p.mode === 'tauto' ? raceTauto(c, p) : raceBrachi(c, p));
 
 /* ---------- Sieve of Eratosthenes ---------- */
-export const buildSieve: Builder = (_c, p) => {
+export const buildSieve: Builder = (c, p) => {
+  const theme = c.theme;
   const N: number = p.n ?? 100;
   const cols: number = p.cols ?? 10;
   const rows = Math.ceil(N / cols);
@@ -469,7 +503,8 @@ export const buildSieve: Builder = (_c, p) => {
   const steps: { p: number; t: number; idx: number }[] = [];
   const primeList: number[] = [];
   for (let i = 2; i <= N; i++) { let ok = true; for (let d = 2; d * d <= i; d++) if (i % d === 0) { ok = false; break; } if (ok) primeList.push(i); }
-  const sc = pentatonic(196, 40);
+  const sc = scaleFreqs(p.scale ?? 2, 196, 40);
+  const voice: AudioEvent['voice'] = p.voice ?? 'marimba';
   let ops = 0;
   for (let q = 2; q * q <= N; q++) if (primeList.includes(q)) ops += Math.floor((N - q * q) / q) + 1;
   const dm = clamp(9 / ops, 0.04, 0.09);
@@ -480,7 +515,7 @@ export const buildSieve: Builder = (_c, p) => {
   for (let q = 2; q * q <= N; q++) {
     if (comp[q]) continue;
     steps.push({ p: q, t, idx: pi });
-    audio.push({ t, f: sc[pi * 2 + 5], voice: 'bell', v: 0.9 });
+    audio.push({ t, f: sc[pi * 2 + 5], voice: 'celesta', v: 0.85 });
     t += 0.55;
     for (let m = q * q; m <= N; m += q) {
       if (!comp[m]) { comp[m] = true; crossedAt[m] = t; crossBy[m] = pi; }
@@ -491,10 +526,11 @@ export const buildSieve: Builder = (_c, p) => {
     pi++;
   }
   const tReveal = t + 0.4;
-  primeList.forEach((q, i) => audio.push({ t: tReveal + i * 0.075, f: sc[Math.min(39, i + 6)], voice: 'marimba', v: 0.7, pan: ((q % cols) / cols - 0.5) }));
+  primeList.forEach((q, i) => audio.push({ t: tReveal + i * 0.075, f: sc[Math.min(39, i + 6)], voice, v: 0.7, pan: ((q % cols) / cols - 0.5) }));
   const tEnd = tReveal + primeList.length * 0.075 + 2.4;
   const stepT = steps.map((s) => s.t);
   const cellXY = (n: number): [number, number] => [gx + ((n - 1) % cols) * cell, gy + Math.floor((n - 1) / cols) * cell];
+  const uncrossedTile = theme.isLight ? 'rgba(18,18,18,0.06)' : 'rgba(255,255,255,0.08)';
   return {
     duration: tEnd,
     audio,
@@ -508,27 +544,37 @@ export const buildSieve: Builder = (_c, p) => {
         const isCrossed = ca <= tm;
         const isPrime = n > 1 && !comp[n];
         const pop = isCrossed ? clamp((tm - ca) / 0.18, 0, 1) : 0;
-        let fill = 'rgba(255,255,255,0.08)';
-        let col = '#ffffff';
+        let fill = uncrossedTile;
+        let col = theme.ink;
         let alpha = 1;
         if (isCrossed) {
-          fill = hsl(n === 1 ? 0 : crossBy[n] * 67 + 10, 70, 45, 0.55 - 0.3 * pop);
+          fill = n === 1
+            ? (theme.isLight ? 'rgba(18,18,18,0.12)' : 'rgba(255,255,255,0.14)')
+            : hsl(crossBy[n] * 67 + 10, theme.isLight ? 52 : 70, theme.isLight ? 72 : 42, 0.55 - 0.32 * pop);
           alpha = 1 - 0.65 * pop;
         }
         if (isPrime && tm >= tReveal) {
           const pr = primeList.indexOf(n);
           const k = clamp((tm - (tReveal + pr * 0.075)) / 0.3, 0, 1);
-          if (k > 0) { fill = hsl(48, 100, 60, 0.9 * k); col = '#2b1b00'; }
+          if (k > 0) {
+            fill = theme.accentInk;
+            col = theme.isLight ? '#ffffff' : '#0f172a';
+            alpha = 0.25 + 0.75 * k;
+          }
         }
-        if (cur && n === cur.p) { fill = hsl(cur.idx * 67 + 10, 95, 60, 1); col = '#111111'; }
+        if (cur && n === cur.p) {
+          fill = theme.accent[cur.idx % theme.accent.length];
+          col = theme.isLight ? '#ffffff' : '#0f172a';
+          alpha = 1;
+        }
         ctx.fillStyle = fill;
         rrect(ctx, x + 3, y + 3, cell - 6, cell - 6, 10);
         ctx.fill();
         text(ctx, String(n), x + cell / 2, y + cell / 2, cell * 0.38, col, { alpha });
-        if (isCrossed && pop < 1 && n > 1) halo(ctx, x + cell / 2, y + cell / 2, cell * 0.9, '#ffffff', 0.5 * (1 - pop));
+        if (!theme.isLight && isCrossed && pop < 1 && n > 1) halo(ctx, x + cell / 2, y + cell / 2, cell * 0.85, theme.ink, 0.45 * (1 - pop));
       }
       const label = tm >= tReveal ? `${primeList.length} PRIMES UNDER ${N}` : cur ? `cross out every multiple of ${cur.p}` : 'the sieve of Eratosthenes';
-      text(ctx, label, 540, gy + rows * cell + 90, 54, tm >= tReveal ? '#ffd166' : '#ffffff');
+      text(ctx, label, 540, gy + rows * cell + 90, 50, tm >= tReveal ? theme.accentInk : theme.ink);
     },
   };
 };

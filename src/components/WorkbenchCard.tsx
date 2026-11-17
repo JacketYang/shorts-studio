@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import type { WorkbenchChannelStatus } from '../workbench/bridge';
+import { extractInstrument, type WorkbenchChannelStatus } from '../workbench/bridge';
+import type { WorkbenchAuditReport } from '../workbench/diversity';
 import { copyText, saveWithPicker } from '../workbench/engine/download';
 import type { VideoSpec as WorkbenchSpec } from '../workbench/engine/types';
+import { themeOf } from '../workbench/scenes';
 import { WorkbenchThumb } from './WorkbenchThumb';
 
 export interface WorkbenchRenderResult {
@@ -20,8 +22,24 @@ const CAT_BADGES: Record<string, string> = {
   math: '📐 数学图形',
 };
 
+const VOICE_LABELS: Record<string, string> = {
+  marimba: '木琴',
+  kalimba: '拇指琴',
+  celesta: '钢片琴',
+  rhodes: '电钢',
+  pizzicato: '弦乐拨奏',
+  blip: '脉冲音',
+  tick: '节拍器',
+  click: '计数器',
+  pluck: '拨弦',
+  harp: '竖琴',
+  bell: '钟琴',
+  chime: '风铃',
+};
+
 interface WorkbenchCardProps {
   spec: WorkbenchSpec;
+  audit?: WorkbenchAuditReport;
   result?: WorkbenchRenderResult;
   job?: { stage: string; p: number };
   queued: boolean;
@@ -44,6 +62,7 @@ interface WorkbenchCardProps {
 
 export const WorkbenchCard: React.FC<WorkbenchCardProps> = ({
   spec,
+  audit,
   result,
   job,
   queued,
@@ -66,6 +85,25 @@ export const WorkbenchCard: React.FC<WorkbenchCardProps> = ({
   const [showCopy, setShowCopy] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState('');
+
+  const theme = themeOf(spec);
+  const voiceKey = extractInstrument({
+    id: spec.id,
+    baseId: spec.id.split('~')[0],
+    engine: spec.engine,
+    params: spec.params,
+    seed: spec.seed,
+    theme: spec.theme,
+    category: spec.category,
+    catLabel: spec.catLabel,
+    title: spec.title,
+    hook: spec.hook,
+    description: spec.description,
+    tags: spec.tags,
+    filename: spec.filename,
+    durationSec: 25,
+  });
+  const voiceLabel = VOICE_LABELS[voiceKey] ?? voiceKey;
 
   const fname = `${spec.filename}.${result?.ext ?? 'mp4'}`;
   const mb = result ? (result.size / 1048576).toFixed(1) : '';
@@ -113,6 +151,27 @@ export const WorkbenchCard: React.FC<WorkbenchCardProps> = ({
       <h3 className="line-clamp-2 min-h-[2.45rem] text-[13px] font-semibold leading-snug text-slate-900">
         {spec.title}
       </h3>
+
+      {/* Aesthetic / Instrument & Strict Audit Row */}
+      <div className="flex items-center justify-between gap-1.5 text-[10px]">
+        <span className="truncate font-mono text-slate-500" title={`引擎 ${spec.engine} · ${theme.labelZh} · 音色 ${voiceLabel}`}>
+          {theme.labelZh} · {voiceLabel}
+        </span>
+        {audit && (
+          <span
+            className={`shrink-0 font-mono font-semibold tabular-nums ${
+              audit.passed ? 'text-emerald-700' : 'text-amber-700'
+            }`}
+            title={
+              audit.passed
+                ? `已通过全部严审（新颖度 ${audit.novelty.score} / 文案 ${audit.metadata.score}）`
+                : `未过审原因：${audit.reasons.join('；')}`
+            }
+          >
+            {audit.passed ? `✓ 严审 ${audit.score}` : `⚠ ${audit.reasons[0]?.slice(0, 12) ?? '待调整'}`}
+          </span>
+        )}
+      </div>
 
       {/* Primary Action or Progress / Result */}
       {job ? (
@@ -225,10 +284,10 @@ export const WorkbenchCard: React.FC<WorkbenchCardProps> = ({
           <button
             type="button"
             onClick={onReroll}
-            title="换一组配色、标题或版式变体"
+            title="切换画风（白底印刷/蓝图/示波器）、音色（木琴/拇指琴/钢片琴/电钢/拨奏）、音阶调性与去重文案，直至通过严格审校"
             className="rounded px-1 py-0.5 hover:bg-slate-100 hover:text-slate-900"
           >
-            🎲 换一版
+            🔄 换风蜕变
           </button>
           <button
             type="button"

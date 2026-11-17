@@ -1,4 +1,4 @@
-import type { Song } from '../engine/music';
+import type { Song } from '../engine/music.ts';
 
 /** 全部为公版（Public Domain）旋律，声音由程序合成，可放心发布 */
 export const SONGS: Song[] = [
@@ -31,4 +31,4 @@ export const SONGS: Song[] = [
   { id: 'moonlight', name: 'Moonlight Sonata', notes: 'G#3:.5 C#4:.5 E4:.5 G#3:.5 C#4:.5 E4:.5 G#3:.5 C#4:.5 E4:.5 G#3:.5 C#4:.5 E4:.5 A3:.5 C#4:.5 E4:.5 A3:.5 C#4:.5 E4:.5 A3:.5 D4:.5 F#4:.5 A3:.5 D4:.5 F#4:.5 G#3:.5 C4:.5 F#4:.5 G#3:.5 C4:.5 E4:.5 G#3:.5 C#4:.5 E4:.5 G#3:.5 C#4:.5 E4:.5' },
 ];
 
-export const songById = (id: string) => SONGS.find((s) => s.id === id)!;
+export const songById = (id: string) => SONGS.find((s) => s.id === id) ?? SONGS[0];

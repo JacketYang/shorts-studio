@@ -12,6 +12,7 @@ import { buildCatalog, CATEGORIES } from '../workbench/catalog/catalog';
 import { drawStill, startPreview } from '../workbench/engine/preview';
 import { THEMES } from '../workbench/engine/util';
 import { buildScene } from '../workbench/scenes';
+import { CreativeAudioTuner } from './CreativeAudioTuner';
 
 interface WorkbenchCreativeBuilderProps {
   state: StudioState;
@@ -67,6 +68,8 @@ export const WorkbenchCreativeBuilder: React.FC<WorkbenchCreativeBuilderProps> =
   const baseSpec = useMemo(() => activeRecipe.spec(variant), [activeRecipe, variant]);
 
   const [themeIdx, setThemeIdx] = useState<number>(baseSpec.theme);
+  const [seedOverride, setSeedOverride] = useState<number>(baseSpec.seed);
+  const [paramOverrides, setParamOverrides] = useState<Record<string, unknown>>({});
   const [customTitle, setCustomTitle] = useState<string>(baseSpec.title);
   const [customHook, setCustomHook] = useState<string>(baseSpec.hook);
   const [customDesc, setCustomDesc] = useState<string>(baseSpec.description);
@@ -87,6 +90,8 @@ export const WorkbenchCreativeBuilder: React.FC<WorkbenchCreativeBuilderProps> =
   // Sync editable metadata whenever recipe or variant changes
   useEffect(() => {
     setThemeIdx(baseSpec.theme);
+    setSeedOverride(baseSpec.seed);
+    setParamOverrides({});
     setCustomTitle(baseSpec.title);
     setCustomHook(baseSpec.hook);
     setCustomDesc(baseSpec.description);
@@ -213,16 +218,26 @@ export const WorkbenchCreativeBuilder: React.FC<WorkbenchCreativeBuilderProps> =
     }
   };
 
+  const mergedParams = useMemo(
+    () => ({
+      ...(baseSpec.params && typeof baseSpec.params === 'object' ? (baseSpec.params as Record<string, unknown>) : {}),
+      ...paramOverrides,
+    }),
+    [baseSpec.params, paramOverrides]
+  );
+
   const previewSpec = useMemo(
     () => ({
       ...baseSpec,
+      seed: seedOverride,
       theme: themeIdx,
+      params: mergedParams,
       title: customTitle.trim() || baseSpec.title,
       hook: customHook.trim() || baseSpec.hook,
       description: customDesc.trim() || baseSpec.description,
       tags: parsedTagList,
     }),
-    [baseSpec, themeIdx, customTitle, customHook, customDesc, parsedTagList]
+    [baseSpec, seedOverride, themeIdx, mergedParams, customTitle, customHook, customDesc, parsedTagList]
   );
 
   const sceneInfo = useMemo(() => {
@@ -401,6 +416,20 @@ export const WorkbenchCreativeBuilder: React.FC<WorkbenchCreativeBuilderProps> =
             })}
           </div>
         </div>
+
+        {/* Step 5: Audio, Speed & Scale Tuning */}
+        <CreativeAudioTuner
+          mode="workbench"
+          engine={previewSpec.engine}
+          params={mergedParams}
+          theme={themeIdx}
+          seed={seedOverride}
+          durationSec={sceneInfo?.scene.duration ?? 25}
+          showThemePicker={false}
+          showTextFields={false}
+          onChangeParams={(patch) => setParamOverrides((prev) => ({ ...prev, ...patch }))}
+          onChangeSeed={(next) => setSeedOverride(next)}
+        />
 
         {/* Metadata Diversification & Compliance Toolbar */}
         <div className="space-y-2.5 rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-xs">

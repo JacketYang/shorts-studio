@@ -1,12 +1,69 @@
-import React, { useState } from 'react';
-import { CheckCircle2, Copy, Download, Film, RefreshCw, ShieldAlert, Trash2, XCircle } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  CheckCircle2,
+  Copy,
+  Download,
+  Film,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  ShieldAlert,
+  SlidersHorizontal,
+  Trash2,
+  XCircle,
+} from 'lucide-react';
+import type { VideoSpec, WorkbenchRecipeMeta } from '../domain/types';
 import type { StudioState } from '../types/ui';
+import { workbenchMetaToWorkbenchSpec } from '../workbench/bridge';
+import { clampTempoScale } from '../workbench/engine/presets';
+import { buildScene } from '../workbench/scenes';
+import { CreativeAudioTuner } from './CreativeAudioTuner';
 import { SimulationPlayer } from './SimulationPlayer';
 
 interface StudioViewProps {
   state: StudioState;
   onRefresh: () => Promise<void>;
   onNavigate: (tab: string) => void;
+}
+
+interface NativeCreativeDraft {
+  title: string;
+  hookLine: string;
+  melodyId: string;
+  tempoBpm: number;
+  motionSpeedScale: number;
+  instrument: string;
+  transpose: number;
+  reverb: number;
+  paletteFamily: 'neon' | 'pastel' | 'mono' | 'warm' | 'cool';
+  seed: number;
+}
+
+const NATIVE_PALETTE_PREVIEW: Record<
+  'neon' | 'pastel' | 'mono' | 'warm' | 'cool',
+  { colors: string[]; bg: [string, string] }
+> = {
+  neon: { colors: ['#00F5D4', '#F15BB5', '#FEE440', '#9B5DE5'], bg: ['#05060F', '#101437'] },
+  pastel: { colors: ['#FFADAD', '#FFD6A5', '#CAFFBF', '#9BF6FF'], bg: ['#1E1B2E', '#2A2438'] },
+  mono: { colors: ['#F8FAFC', '#CBD5E1', '#94A3B8', '#64748B'], bg: ['#09090B', '#18181B'] },
+  warm: { colors: ['#F97316', '#FBBF24', '#EF4444', '#FB7185'], bg: ['#1C0F0A', '#2D160C'] },
+  cool: { colors: ['#38BDF8', '#22D3EE', '#818CF8', '#34D399'], bg: ['#061423', '#0B253A'] },
+};
+
+function makeNativeDraftFromSpec(spec: VideoSpec): NativeCreativeDraft {
+  const mRef = spec.audio.music?.melody_ref;
+  return {
+    title: spec.publish.title,
+    hookLine: spec.concept.hook_line,
+    melodyId: mRef?.source === 'library' ? mRef.id : 'pd:canon-in-d',
+    tempoBpm: spec.audio.music?.tempo_bpm ?? 108,
+    motionSpeedScale: 1,
+    instrument: spec.audio.music?.instrument ?? 'marimba',
+    transpose: spec.audio.music?.transpose ?? 0,
+    reverb: spec.audio.music?.reverb ?? 0.12,
+    paletteFamily: spec.scene.style.palette.family,
+    seed: spec.scene.seed,
+  };
 }
 
 export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavigate }) => {
@@ -20,16 +77,213 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
   const [busy, setBusy] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
 
+  const [tunerOpen, setTunerOpen] = useState(true);
+  const [draftWbMeta, setDraftWbMeta] = useState<WorkbenchRecipeMeta | null>(null);
+  const [draftWbTitle, setDraftWbTitle] = useState('');
+  const [nativeDraft, setNativeDraft] = useState<NativeCreativeDraft | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [savingCreative, setSavingCreative] = useState(false);
+  const [creativeNotice, setCreativeNotice] = useState<{ ok: boolean; text: string } | null>(null);
+
   const selectedRender =
     state.renders.find((r) => r.id === selectedRenderId) ?? state.renders[0] ?? null;
   const selectedSpec = selectedRender
     ? state.specs.find((s) => s.id === selectedRender.spec_id) ?? null
     : null;
 
-  const melodyResolved =
-    selectedSpec?.spec.audio.music?.melody_ref.source === 'library'
-      ? state.melodies.find((m) => m.id === (selectedSpec.spec.audio.music!.melody_ref as { source: 'library'; id: string }).id)
-      : undefined;
+  // Sync draft when selection or saved spec timestamp changes
+  useEffect(() => {
+    setDirty(false);
+    if (!selectedRender || !selectedSpec) {
+      setDraftWbMeta(null);
+      setDraftWbTitle('');
+      setNativeDraft(null);
+      return;
+    }
+    if (selectedRender.workbench_meta) {
+      const m = selectedRender.workbench_meta;
+      setDraftWbMeta({
+        ...m,
+        params:
+          m.params && typeof m.params === 'object'
+            ? structuredClone(m.params)
+            : {},
+      });
+      setDraftWbTitle(selectedSpec.spec.publish.title);
+      setNativeDraft(null);
+    } else {
+      setDraftWbMeta(null);
+      setDraftWbTitle('');
+      setNativeDraft(makeNativeDraftFromSpec(selectedSpec.spec));
+    }
+  }, [selectedRender?.id, selectedSpec?.id, selectedSpec?.updated_at]);
+
+  useEffect(() => {
+    setCreativeNotice(null);
+  }, [selectedSpec?.id]);
+
+  const draftWbDuration = useMemo(() => {
+    if (!draftWbMeta || !selectedSpec) return draftWbMeta?.duration_sec ?? 25;
+    try {
+      const wbSpec = workbenchMetaToWorkbenchSpec(
+        draftWbMeta,
+        draftWbTitle || selectedSpec.spec.publish.title,
+        selectedSpec.spec.publish.description,
+        selectedSpec.spec.publish.tags
+      );
+      return buildScene(wbSpec).duration;
+    } catch {
+      return draftWbMeta.duration_sec;
+    }
+  }, [draftWbMeta, draftWbTitle, selectedSpec]);
+
+  const liveSpecForPlayer = useMemo<VideoSpec | null>(() => {
+    if (!selectedSpec) return null;
+    if (selectedRender?.workbench_meta && draftWbMeta) {
+      return {
+        ...selectedSpec.spec,
+        scene: {
+          ...selectedSpec.spec.scene,
+          seed: draftWbMeta.seed,
+        },
+        concept: {
+          ...selectedSpec.spec.concept,
+          hook_line: draftWbMeta.hook,
+          working_title: draftWbTitle || selectedSpec.spec.publish.title,
+        },
+        publish: {
+          ...selectedSpec.spec.publish,
+          title: draftWbTitle || selectedSpec.spec.publish.title,
+        },
+      };
+    }
+    if (!selectedRender?.workbench_meta && nativeDraft) {
+      const base = selectedSpec.spec;
+      const cloned: VideoSpec = structuredClone(base);
+      cloned.publish.title = nativeDraft.title || base.publish.title;
+      cloned.concept.working_title = cloned.publish.title;
+      cloned.concept.hook_line = nativeDraft.hookLine || base.concept.hook_line;
+      cloned.scene.seed = nativeDraft.seed;
+      const pal = NATIVE_PALETTE_PREVIEW[nativeDraft.paletteFamily];
+      if (pal) {
+        cloned.scene.style.palette = { family: nativeDraft.paletteFamily, colors: [...pal.colors] };
+        cloned.scene.style.background = { type: 'gradient', colors: [...pal.bg] };
+      }
+      if (cloned.audio.music) {
+        cloned.audio.music.melody_ref = { source: 'library', id: nativeDraft.melodyId };
+        cloned.audio.music.tempo_bpm = nativeDraft.tempoBpm;
+        cloned.audio.music.instrument = nativeDraft.instrument;
+        cloned.audio.music.transpose = nativeDraft.transpose;
+        cloned.audio.music.reverb = nativeDraft.reverb;
+      }
+      const s = clampTempoScale(nativeDraft.motionSpeedScale);
+      if (Math.abs(s - 1) > 0.001) {
+        const scParams = cloned.scene.params as Record<string, Record<string, unknown>>;
+        if (cloned.scene.template === 'melody-bounce' && scParams.balls && typeof scParams.balls.speed === 'number') {
+          scParams.balls.speed = Number(Math.max(0.25, Math.min(1.5, scParams.balls.speed * s)).toFixed(3));
+        } else if (cloned.scene.template === 'orbit-sync' && scParams.orbits && typeof scParams.orbits.base_omega === 'number') {
+          scParams.orbits.base_omega = Number(Math.max(0.3, Math.min(4.0, scParams.orbits.base_omega * s)).toFixed(3));
+        } else if (cloned.scene.template === 'pendulum-wave' && scParams.rule && typeof scParams.rule.cycle_sec === 'number') {
+          scParams.rule.cycle_sec = Number(Math.max(8, Math.min(60, scParams.rule.cycle_sec / s)).toFixed(2));
+        } else if (cloned.scene.template === 'rings-escape' && scParams.rings && typeof scParams.rings.rotation_deg_per_s === 'number') {
+          scParams.rings.rotation_deg_per_s = Number(
+            Math.max(-120, Math.min(120, scParams.rings.rotation_deg_per_s * s)).toFixed(2)
+          );
+        }
+      }
+      return cloned;
+    }
+    return selectedSpec.spec;
+  }, [selectedSpec, selectedRender?.workbench_meta, draftWbMeta, draftWbTitle, nativeDraft]);
+
+  const melodyResolved = useMemo(() => {
+    const targetSpec = liveSpecForPlayer ?? selectedSpec?.spec;
+    if (targetSpec?.audio.music?.melody_ref.source === 'library') {
+      const mId = targetSpec.audio.music.melody_ref.id;
+      return state.melodies.find((m) => m.id === mId);
+    }
+    return undefined;
+  }, [liveSpecForPlayer, selectedSpec, state.melodies]);
+
+  const handleResetDraft = () => {
+    if (!selectedRender || !selectedSpec) return;
+    if (selectedRender.workbench_meta) {
+      const m = selectedRender.workbench_meta;
+      setDraftWbMeta({
+        ...m,
+        params: m.params && typeof m.params === 'object' ? structuredClone(m.params) : {},
+      });
+      setDraftWbTitle(selectedSpec.spec.publish.title);
+    } else {
+      setNativeDraft(makeNativeDraftFromSpec(selectedSpec.spec));
+    }
+    setDirty(false);
+    setCreativeNotice(null);
+  };
+
+  const handleSaveCreative = async () => {
+    if (!selectedRender || !selectedSpec) return;
+    setSavingCreative(true);
+    setCreativeNotice(null);
+    try {
+      const payload =
+        selectedRender.workbench_meta && draftWbMeta
+          ? {
+              title: draftWbTitle.trim() || selectedSpec.spec.publish.title,
+              hookLine: draftWbMeta.hook,
+              seed: draftWbMeta.seed,
+              theme: draftWbMeta.theme,
+              durationSec: Math.round(draftWbDuration),
+              paramsPatch:
+                draftWbMeta.params && typeof draftWbMeta.params === 'object'
+                  ? (draftWbMeta.params as Record<string, unknown>)
+                  : {},
+            }
+          : nativeDraft
+            ? {
+                title: nativeDraft.title.trim() || selectedSpec.spec.publish.title,
+                hookLine: nativeDraft.hookLine,
+                seed: nativeDraft.seed,
+                paletteFamily: nativeDraft.paletteFamily,
+                motionSpeedScale: nativeDraft.motionSpeedScale,
+                audioPatch: {
+                  melodyId: nativeDraft.melodyId,
+                  tempoBpm: nativeDraft.tempoBpm,
+                  transpose: nativeDraft.transpose,
+                  instrument: nativeDraft.instrument,
+                  reverb: nativeDraft.reverb,
+                },
+              }
+            : {};
+
+      const res = await fetch(`/api/specs/${selectedSpec.id}/creative`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCreativeNotice({ ok: false, text: data.error ?? '保存音画调校失败' });
+        return;
+      }
+      if (data.render?.id) {
+        setSelectedRenderId(data.render.id);
+      }
+      setDirty(false);
+      await onRefresh();
+      const noveltyScore = data.render?.novelty?.score;
+      setCreativeNotice({
+        ok: true,
+        text: selectedRender.workbench_meta
+          ? `已保存音画与节奏调校（差异度 ${noveltyScore ?? '--'}/100）。请点击下方「渲染 1080p 成片并存入生产线存储」写入最新成片。`
+          : `已保存音画参数并重算确定性仿真（Novelty ${noveltyScore ?? '--'}/100）。`,
+      });
+    } catch (err) {
+      setCreativeNotice({ ok: false, text: err instanceof Error ? err.message : '保存失败' });
+    } finally {
+      setSavingCreative(false);
+    }
+  };
 
   const handleRetryRender = async (renderId: string) => {
     setBusy(true);
@@ -130,7 +384,7 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
           <div className="rounded-lg border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-900">确定性渲染队列 ({state.renders.length})</h2>
             <p className="mt-1 text-xs text-slate-500">
-              相同 Spec + 种子 + 模板版本输出完全一致的仿真哈希与音画事件。
+              相同 Spec + 种子 + 模板版本输出完全一致的仿真哈希与音画事件；右侧支持随时微调节奏/曲目/音色。
             </p>
             <div className="mt-3 divide-y divide-slate-100">
               {state.renders.map((rnd) => {
@@ -280,19 +534,32 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
           )}
         </div>
 
-        {/* Right: 9:16 Deterministic Preview + MP4 Download */}
+        {/* Right: 9:16 Deterministic Preview + Live Creative Tuner + MP4 Download */}
         <div className="rounded-lg border border-slate-200 bg-white p-5 lg:col-span-7">
-          {selectedRender && selectedSpec ? (
-            <div className="space-y-5">
+          {selectedRender && selectedSpec && liveSpecForPlayer ? (
+            <div className="space-y-4">
               <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4">
                 <div>
-                  <h2 className="text-base font-semibold text-slate-900">{selectedSpec.spec.publish.title}</h2>
+                  <h2 className="text-base font-semibold text-slate-900">{liveSpecForPlayer.publish.title}</h2>
                   <div className="mt-1 font-mono text-xs text-slate-500">
-                    {selectedSpec.spec.axes.mechanic} · {selectedSpec.spec.axes.arena} · seed {selectedSpec.spec.scene.seed} ·
+                    {selectedSpec.spec.axes.mechanic} · {selectedSpec.spec.axes.arena} · seed {liveSpecForPlayer.scene.seed} ·
                     SHA {selectedRender.file_sha256.slice(0, 12)}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTunerOpen((v) => !v)}
+                    aria-expanded={tunerOpen}
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 ${
+                      tunerOpen
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
+                    }`}
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    {tunerOpen ? '收起音画调校' : '调速/换曲/换音色'}
+                  </button>
                   <a
                     href={`/api/renders/${selectedRender.id}/mp4`}
                     className={`inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 ${
@@ -317,13 +584,136 @@ export const StudioView: React.FC<StudioViewProps> = ({ state, onRefresh, onNavi
                 </div>
               </div>
 
+              {/* Inline Live Creative & Music Tuner */}
+              {tunerOpen && (
+                <div className="space-y-2.5">
+                  {selectedRender.workbench_meta && draftWbMeta ? (
+                    <CreativeAudioTuner
+                      mode="workbench"
+                      engine={draftWbMeta.engine}
+                      params={
+                        draftWbMeta.params && typeof draftWbMeta.params === 'object'
+                          ? (draftWbMeta.params as Record<string, unknown>)
+                          : {}
+                      }
+                      theme={draftWbMeta.theme}
+                      seed={draftWbMeta.seed}
+                      durationSec={draftWbDuration}
+                      hookLine={draftWbMeta.hook}
+                      title={draftWbTitle}
+                      onChangeParams={(patch) => {
+                        setDraftWbMeta((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                params: {
+                                  ...(prev.params && typeof prev.params === 'object'
+                                    ? (prev.params as Record<string, unknown>)
+                                    : {}),
+                                  ...patch,
+                                },
+                              }
+                            : prev
+                        );
+                        setDirty(true);
+                        setCreativeNotice(null);
+                      }}
+                      onChangeTheme={(nextTheme) => {
+                        setDraftWbMeta((prev) => (prev ? { ...prev, theme: nextTheme } : prev));
+                        setDirty(true);
+                        setCreativeNotice(null);
+                      }}
+                      onChangeSeed={(nextSeed) => {
+                        setDraftWbMeta((prev) => (prev ? { ...prev, seed: nextSeed } : prev));
+                        setDirty(true);
+                        setCreativeNotice(null);
+                      }}
+                      onChangeHookLine={(val) => {
+                        setDraftWbMeta((prev) => (prev ? { ...prev, hook: val } : prev));
+                        setDirty(true);
+                        setCreativeNotice(null);
+                      }}
+                      onChangeTitle={(val) => {
+                        setDraftWbTitle(val);
+                        setDirty(true);
+                        setCreativeNotice(null);
+                      }}
+                    />
+                  ) : nativeDraft ? (
+                    <CreativeAudioTuner
+                      mode="native"
+                      melodies={state.melodies}
+                      melodyId={nativeDraft.melodyId}
+                      tempoBpm={nativeDraft.tempoBpm}
+                      motionSpeedScale={nativeDraft.motionSpeedScale}
+                      instrument={nativeDraft.instrument}
+                      transpose={nativeDraft.transpose}
+                      reverb={nativeDraft.reverb}
+                      paletteFamily={nativeDraft.paletteFamily}
+                      seed={nativeDraft.seed}
+                      hookLine={nativeDraft.hookLine}
+                      title={nativeDraft.title}
+                      durationSec={selectedSpec.spec.format.duration_sec}
+                      onChangeNative={(patch) => {
+                        setNativeDraft((prev) => (prev ? { ...prev, ...patch } : prev));
+                        setDirty(true);
+                        setCreativeNotice(null);
+                      }}
+                    />
+                  ) : null}
+
+                  {(dirty || creativeNotice) && (
+                    <div
+                      className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${
+                        dirty
+                          ? 'border-amber-200 bg-amber-50 text-amber-900'
+                          : creativeNotice?.ok
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                            : 'border-rose-200 bg-rose-50 text-rose-800'
+                      }`}
+                    >
+                      <span className="min-w-0 flex-1">
+                        {dirty
+                          ? selectedRender.workbench_meta && selectedRender.media_ready
+                            ? '正在试听未保存的音画改动：点「保存调校」后将重新计算差异度分，并需重渲 MP4 覆盖旧成片。'
+                            : '正在实时试听未保存的改动：可直接点下方「播放预览」试听速度、曲目与音色效果。'
+                          : creativeNotice?.text}
+                      </span>
+
+                      {dirty && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            disabled={savingCreative}
+                            onClick={handleResetDraft}
+                            className="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            还原已保存
+                          </button>
+                          <button
+                            type="button"
+                            disabled={savingCreative}
+                            onClick={() => void handleSaveCreative()}
+                            className="inline-flex items-center gap-1 rounded bg-slate-900 px-3 py-1 font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                          >
+                            <Save className="h-3 w-3" />
+                            {savingCreative ? '保存中…' : '保存调校并重算审校'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <SimulationPlayer
-                spec={selectedSpec.spec}
+                spec={liveSpecForPlayer}
                 melody={melodyResolved}
                 renderId={selectedRender?.id ?? null}
                 renderCompleted={selectedRender?.status === 'completed'}
-                workbenchMeta={selectedRender?.workbench_meta ?? null}
-                mediaReady={Boolean(selectedRender?.media_ready)}
+                workbenchMeta={selectedRender?.workbench_meta ? draftWbMeta : null}
+                mediaReady={Boolean(selectedRender?.media_ready) && !dirty}
                 storageHint={
                   state.storage_config.driver === 'local'
                     ? `${state.storage_config.local_dir}/renders`

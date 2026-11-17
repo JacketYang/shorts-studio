@@ -7,6 +7,13 @@ import {
   type WorkbenchChannelStatus,
 } from '../workbench/bridge';
 import { buildCatalog, CATEGORIES } from '../workbench/catalog/catalog';
+import {
+  auditWorkbenchSpecStrict,
+  buildAuditContextFromHistory,
+  findPassingVariant,
+  pickDiversePassBatch,
+  type WorkbenchAuditReport,
+} from '../workbench/diversity';
 import { buildZip, saveUrl } from '../workbench/engine/download';
 import { renderVideo } from '../workbench/engine/render';
 import type { VideoSpec as WorkbenchSpec } from '../workbench/engine/types';
@@ -59,6 +66,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
   const [metaOverrides, setMetaOverrides] = useState<
     Record<string, { title: string; hook: string; description: string; tags: string[] }>
   >({});
+  const [specOverrides, setSpecOverrides] = useState<Record<string, Partial<WorkbenchSpec>>>({});
   const [diversifyRound, setDiversifyRound] = useState(0);
   const [aiBatching, setAiBatching] = useState(false);
 
@@ -67,9 +75,14 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
       recipes.map((r) => {
         const base = r.spec(variants[r.id] ?? 0);
         const ov = metaOverrides[base.id];
-        return ov ? { ...base, ...ov } : base;
+        const spOv = specOverrides[base.id];
+        return {
+          ...base,
+          ...(ov ?? {}),
+          ...(spOv ?? {}),
+        };
       }),
-    [recipes, variants, metaOverrides]
+    [recipes, variants, metaOverrides, specOverrides]
   );
 
   const [cat, setCat] = useState('all');
@@ -137,6 +150,34 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
     () => specs.filter((s) => isMarkedDone(s)).length,
     [specs, isMarkedDone]
   );
+
+  const auditCtx = useMemo(
+    () =>
+      buildAuditContextFromHistory({
+        channelProfile: state.profile,
+        specs: state.specs,
+        renders: state.renders,
+        videos: state.videos,
+        remoteTitles: state.remote_videos.filter((v) => !v.is_legacy).map((v) => v.title),
+      }),
+    [state.profile, state.specs, state.renders, state.videos, state.remote_videos]
+  );
+
+  const auditMap = useMemo(() => {
+    const map = new Map<string, WorkbenchAuditReport>();
+    for (const s of specs) {
+      map.set(s.id, auditWorkbenchSpecStrict(s, auditCtx));
+    }
+    return map;
+  }, [specs, auditCtx]);
+
+  const strictPassCount = useMemo(() => {
+    let n = 0;
+    for (const rep of auditMap.values()) {
+      if (rep.passed) n++;
+    }
+    return n;
+  }, [auditMap]);
 
   const markDownloaded = useCallback((id: string) => {
     setDownloaded((prev) => {
@@ -253,6 +294,64 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
       text: `已用「无 AI 本地防重引擎」为 ${targets.length} 条创意重新生成去重且合规的标题、钩子与 3-4 标签描述。`,
       targetTab: 'channels',
       targetLabel: '如需 AI 语义润色可点右方按钮或去设置模型',
+    });
+  };
+
+  const handleSmartDiversePick = () => {
+    const excludeBaseIds = new Set(
+      specs
+        .filter((s) => isMarkedDone(s) || statusMap.get(s.id)?.inChannel)
+        .map((s) => s.id.split('~')[0])
+    );
+    const batch = pickDiversePassBatch(recipes, 7, auditCtx, {
+      currentVariants: variants,
+      excludeBaseIds,
+    });
+    if (batch.picks.length === 0) {
+      setStatusNotice({
+        text: '当前频道历史冲突密集，暂未凑齐无冲突批次，请对列表条目点「🔄 换风蜕变」或先清理队列。',
+        targetTab: 'studio',
+        targetLabel: '查看制作与审核队列',
+      });
+      return;
+    }
+    if (Object.keys(batch.variantsUpdate).length > 0) {
+      setVariants((prev) => ({ ...prev, ...batch.variantsUpdate }));
+    }
+    if (Object.keys(batch.metaOverridesUpdate).length > 0) {
+      setMetaOverrides((prev) => ({ ...prev, ...batch.metaOverridesUpdate }));
+    }
+    setSelected(new Set(batch.picks.map((p) => p.spec.id)));
+    const avgScore = Math.round(
+      batch.picks.reduce((sum, item) => sum + item.audit.score, 0) / batch.picks.length
+    );
+    setStatusNotice({
+      text: `已跨 5 大分类与浅/深画风自动严选并勾选 ${batch.picks.length} 条全过审创意（平均严审分 ${avgScore}，全部满足去重与无 AI Slop 要求）。`,
+      targetTab: 'studio',
+      targetLabel: '可直接点「送入审校队列」',
+    });
+  };
+
+  const handleRerollSpec = (s: WorkbenchSpec) => {
+    const base = s.id.split('~')[0];
+    const recipe = recipes.find((r) => r.id === base);
+    if (!recipe) {
+      setVariants((v) => ({ ...v, [base]: (v[base] ?? 0) + 1 }));
+      return;
+    }
+    const curV = variants[base] ?? 0;
+    const res = findPassingVariant(recipe, curV, auditCtx);
+    setVariants((v) => ({ ...v, [base]: res.variant }));
+    if (res.metaOverride) {
+      const ov = res.metaOverride;
+      setMetaOverrides((prev) => ({ ...prev, [res.spec.id]: ov }));
+    }
+    setSelected((prev) => {
+      if (!prev.has(s.id)) return prev;
+      const next = new Set(prev);
+      next.delete(s.id);
+      next.add(res.spec.id);
+      return next;
     });
   };
 
@@ -507,6 +606,9 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-2 font-mono text-xs tabular-nums">
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-emerald-800">
+            严审过检 <span className="font-semibold">{strictPassCount}/{specs.length}</span>
+          </div>
           <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-slate-600">
             已生成 <span className="font-semibold text-slate-900">{totalDone}</span>
           </div>
@@ -642,6 +744,14 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
           >
             全选 ({filtered.length})
+          </button>
+          <button
+            type="button"
+            onClick={handleSmartDiversePick}
+            title="不放松任何审校标准：跨 5 类引擎、浅/深主题、不同音色与去重文案，自动选出 7 条全部过审且互不撞车的视频"
+            className="rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-1.5 font-semibold text-emerald-900 hover:bg-emerald-100"
+          >
+            🎯 智能严选防重 (7条过审)
           </button>
           <button
             type="button"
@@ -802,6 +912,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
             <WorkbenchCard
               key={s.id}
               spec={s}
+              audit={auditMap.get(s.id)}
               result={results[s.id]}
               job={jobs[s.id]}
               queued={queued.has(s.id) && !jobs[s.id]}
@@ -818,15 +929,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
               onEnqueueReview={() => void handleBatchEnqueue([s], false)}
               onEnqueueSchedule={() => void handleBatchEnqueue([s], true)}
               onRenderAndSync={() => enqueueRender(s, false, true)}
-              onReroll={() => {
-                const base = s.id.split('~')[0];
-                setVariants((v) => ({ ...v, [base]: (v[base] ?? 0) + 1 }));
-                setSelected((prev) => {
-                  const next = new Set(prev);
-                  next.delete(s.id);
-                  return next;
-                });
-              }}
+              onReroll={() => handleRerollSpec(s)}
               onMarkDownloaded={() => markDownloaded(s.id)}
             />
           ))}
@@ -862,10 +965,71 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({ state, onRefresh, 
           channelStatus={statusMap.get(previewSpec.id)!}
           busy={busy || enqueuing}
           onClose={() => setPreviewSpec(null)}
-          onGenerateDownload={() => enqueueRender(previewSpec, true, false)}
-          onEnqueueReview={() => void handleBatchEnqueue([previewSpec], false)}
-          onEnqueueSchedule={() => void handleBatchEnqueue([previewSpec], true)}
-          onRenderAndUpload={() => enqueueRender(previewSpec, false, true)}
+          onSaveSpec={(updated) => {
+            setSpecOverrides((prev) => ({
+              ...prev,
+              [updated.id]: {
+                params: updated.params,
+                theme: updated.theme,
+                seed: updated.seed,
+                hook: updated.hook,
+                title: updated.title,
+              },
+            }));
+            setPreviewSpec(updated);
+          }}
+          onGenerateDownload={(specToUse) => {
+            setSpecOverrides((prev) => ({
+              ...prev,
+              [specToUse.id]: {
+                params: specToUse.params,
+                theme: specToUse.theme,
+                seed: specToUse.seed,
+                hook: specToUse.hook,
+                title: specToUse.title,
+              },
+            }));
+            enqueueRender(specToUse, true, false);
+          }}
+          onEnqueueReview={(specToUse) => {
+            setSpecOverrides((prev) => ({
+              ...prev,
+              [specToUse.id]: {
+                params: specToUse.params,
+                theme: specToUse.theme,
+                seed: specToUse.seed,
+                hook: specToUse.hook,
+                title: specToUse.title,
+              },
+            }));
+            void handleBatchEnqueue([specToUse], false);
+          }}
+          onEnqueueSchedule={(specToUse) => {
+            setSpecOverrides((prev) => ({
+              ...prev,
+              [specToUse.id]: {
+                params: specToUse.params,
+                theme: specToUse.theme,
+                seed: specToUse.seed,
+                hook: specToUse.hook,
+                title: specToUse.title,
+              },
+            }));
+            void handleBatchEnqueue([specToUse], true);
+          }}
+          onRenderAndUpload={(specToUse) => {
+            setSpecOverrides((prev) => ({
+              ...prev,
+              [specToUse.id]: {
+                params: specToUse.params,
+                theme: specToUse.theme,
+                seed: specToUse.seed,
+                hook: specToUse.hook,
+                title: specToUse.title,
+              },
+            }));
+            enqueueRender(specToUse, false, true);
+          }}
         />
       )}
     </div>

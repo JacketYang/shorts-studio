@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { WorkbenchChannelStatus } from '../workbench/bridge';
 import { copyText } from '../workbench/engine/download';
 import { startPreview } from '../workbench/engine/preview';
 import type { VideoSpec as WorkbenchSpec } from '../workbench/engine/types';
 import { buildScene, themeOf } from '../workbench/scenes';
+import { CreativeAudioTuner } from './CreativeAudioTuner';
 
 const CAT_LABELS: Record<string, string> = {
   music: '🎵 旋律·球体奏乐',
@@ -20,10 +21,11 @@ interface WorkbenchPreviewModalProps {
   channelStatus: WorkbenchChannelStatus;
   busy: boolean;
   onClose: () => void;
-  onGenerateDownload: () => void;
-  onRenderAndUpload: () => void;
-  onEnqueueReview: () => void;
-  onEnqueueSchedule: () => void;
+  onSaveSpec?: (updatedSpec: WorkbenchSpec) => void;
+  onGenerateDownload: (specToUse: WorkbenchSpec) => void;
+  onRenderAndUpload: (specToUse: WorkbenchSpec) => void;
+  onEnqueueReview: (specToUse: WorkbenchSpec) => void;
+  onEnqueueSchedule: (specToUse: WorkbenchSpec) => void;
 }
 
 export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
@@ -33,16 +35,25 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
   channelStatus,
   busy,
   onClose,
+  onSaveSpec,
   onGenerateDownload,
   onRenderAndUpload,
   onEnqueueReview,
   onEnqueueSchedule,
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const [draftSpec, setDraftSpec] = useState<WorkbenchSpec>(spec);
+  const [dirty, setDirty] = useState(false);
+  const [showTuner, setShowTuner] = useState(true);
   const [sound, setSound] = useState(true);
   const [loading, setLoading] = useState(true);
   const [duration, setDuration] = useState(0);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraftSpec(spec);
+    setDirty(false);
+  }, [spec]);
 
   useEffect(() => {
     setLoading(true);
@@ -51,21 +62,21 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
     const timer = setTimeout(() => {
       if (dead || !canvasRef.current) return;
       try {
-        const scene = buildScene(spec);
+        const scene = buildScene(draftSpec);
         setDuration(scene.duration);
-        handle = startPreview(canvasRef.current, scene, themeOf(spec), spec.hook, sound);
+        handle = startPreview(canvasRef.current, scene, themeOf(draftSpec), draftSpec.hook, sound);
       } catch (err) {
         console.error('Workbench preview error:', err);
       }
       setLoading(false);
-    }, 30);
+    }, 90);
 
     return () => {
       dead = true;
       clearTimeout(timer);
       handle?.stop();
     };
-  }, [spec, sound]);
+  }, [draftSpec, sound]);
 
   const handleCopy = async (key: string, value: string) => {
     const ok = await copyText(value);
@@ -75,16 +86,27 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
     }
   };
 
+  const patchParams = (patch: Record<string, unknown>) => {
+    setDraftSpec((prev) => ({
+      ...prev,
+      params: {
+        ...(prev.params && typeof prev.params === 'object' ? (prev.params as Record<string, unknown>) : {}),
+        ...patch,
+      },
+    }));
+    setDirty(true);
+  };
+
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`预览 ${spec.title}`}
+      aria-label={`预览 ${draftSpec.title}`}
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4"
       onClick={onClose}
     >
       <div
-        className="flex max-h-[94vh] w-full max-w-4xl flex-col gap-5 overflow-auto rounded-xl border border-slate-200 bg-white p-5 text-slate-900 shadow-2xl md:flex-row"
+        className="flex max-h-[94vh] w-full max-w-5xl flex-col gap-5 overflow-auto rounded-xl border border-slate-200 bg-white p-5 text-slate-900 shadow-2xl md:flex-row"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="relative mx-auto aspect-[9/16] h-[68vh] max-h-[720px] shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-950">
@@ -106,10 +128,10 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
               <div className="text-xs font-medium text-sky-700">
-                {CAT_LABELS[spec.category] ?? spec.catLabel}
+                {CAT_LABELS[draftSpec.category] ?? draftSpec.catLabel}
                 {duration > 0 && ` · ${duration.toFixed(1)}s`}
               </div>
-              <h3 className="text-lg font-bold leading-snug text-slate-900">{spec.title}</h3>
+              <h3 className="text-lg font-bold leading-snug text-slate-900">{draftSpec.title}</h3>
             </div>
             <button
               type="button"
@@ -124,24 +146,15 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => handleCopy('title', spec.title)}
-              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+              onClick={() => setShowTuner((v) => !v)}
+              aria-expanded={showTuner}
+              className={`rounded-md border px-3 py-1.5 text-xs font-medium ${
+                showTuner
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+              }`}
             >
-              {copiedKey === 'title' ? '✓ 已复制标题' : '复制标题'}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleCopy('desc', spec.description)}
-              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-            >
-              {copiedKey === 'desc' ? '✓ 已复制描述' : '复制描述'}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleCopy('tags', spec.tags.join(', '))}
-              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-            >
-              {copiedKey === 'tags' ? '✓ 已复制标签' : '复制标签'}
+              {showTuner ? '🎚️ 收起音乐/速度微调' : '🎚️ 调整音乐/速度/画风'}
             </button>
             <button
               type="button"
@@ -150,14 +163,99 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
             >
               {sound ? '🔊 声音开' : '🔇 静音'}
             </button>
+            <button
+              type="button"
+              onClick={() => handleCopy('title', draftSpec.title)}
+              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              {copiedKey === 'title' ? '✓ 已复制标题' : '复制标题'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleCopy('desc', draftSpec.description)}
+              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              {copiedKey === 'desc' ? '✓ 已复制描述' : '复制描述'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleCopy('tags', draftSpec.tags.join(', '))}
+              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              {copiedKey === 'tags' ? '✓ 已复制标签' : '复制标签'}
+            </button>
           </div>
 
-          <pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 p-3.5 font-sans text-xs leading-relaxed text-slate-700">
-            {spec.description}
+          {showTuner && (
+            <div className="space-y-2">
+              <CreativeAudioTuner
+                mode="workbench"
+                engine={draftSpec.engine}
+                params={
+                  draftSpec.params && typeof draftSpec.params === 'object'
+                    ? (draftSpec.params as Record<string, unknown>)
+                    : {}
+                }
+                theme={draftSpec.theme}
+                seed={draftSpec.seed}
+                durationSec={duration || 25}
+                hookLine={draftSpec.hook}
+                title={draftSpec.title}
+                compact
+                onChangeParams={patchParams}
+                onChangeTheme={(nextTheme) => {
+                  setDraftSpec((prev) => ({ ...prev, theme: nextTheme }));
+                  setDirty(true);
+                }}
+                onChangeSeed={(nextSeed) => {
+                  setDraftSpec((prev) => ({ ...prev, seed: nextSeed }));
+                  setDirty(true);
+                }}
+                onChangeHookLine={(val) => {
+                  setDraftSpec((prev) => ({ ...prev, hook: val }));
+                  setDirty(true);
+                }}
+                onChangeTitle={(val) => {
+                  setDraftSpec((prev) => ({ ...prev, title: val }));
+                  setDirty(true);
+                }}
+              />
+              {dirty && onSaveSpec && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
+                  <span>已应用实时音画改动（预览已同步更新）。</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraftSpec(spec);
+                        setDirty(false);
+                      }}
+                      className="rounded border border-amber-300 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      还原
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSaveSpec(draftSpec);
+                        setDirty(false);
+                      }}
+                      className="rounded bg-slate-900 px-3 py-1 font-semibold text-white hover:bg-slate-800"
+                    >
+                      保存调校到列表
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 p-3 font-sans text-xs leading-relaxed text-slate-700">
+            {draftSpec.description}
           </pre>
 
           <div className="text-xs leading-relaxed text-slate-500">
-            标签 : {spec.tags.join(', ')}
+            标签 : {draftSpec.tags.join(', ')}
           </div>
 
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
@@ -168,7 +266,7 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
             <button
               type="button"
               onClick={() => {
-                onGenerateDownload();
+                onGenerateDownload(draftSpec);
                 onClose();
               }}
               className="w-full rounded-md bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
@@ -181,7 +279,7 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
                 disabled={busy}
                 title={`送入「${channelTitle}」制作与审核队列`}
                 onClick={() => {
-                  onEnqueueReview();
+                  onEnqueueReview(draftSpec);
                   onClose();
                 }}
                 className="truncate rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-40"
@@ -193,7 +291,7 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
                 disabled={busy}
                 title={`直接加入「${channelTitle}」排期`}
                 onClick={() => {
-                  onEnqueueSchedule();
+                  onEnqueueSchedule(draftSpec);
                   onClose();
                 }}
                 className="truncate rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-40"
@@ -204,7 +302,7 @@ export const WorkbenchPreviewModal: React.FC<WorkbenchPreviewModalProps> = ({
                 type="button"
                 disabled={busy}
                 onClick={() => {
-                  onRenderAndUpload();
+                  onRenderAndUpload(draftSpec);
                   onClose();
                 }}
                 className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-800 whitespace-nowrap hover:bg-sky-100 disabled:opacity-40"

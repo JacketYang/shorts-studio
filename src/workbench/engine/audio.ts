@@ -26,6 +26,10 @@ export function synth(events: AudioEvent[], duration: number, echo = true) {
       case 'marimba': len = 0.9; break;
       case 'bell': len = 1.6; break;
       case 'pluck': len = 0.8; break;
+      case 'kalimba': len = 1.05; break;
+      case 'celesta': len = 1.45; break;
+      case 'rhodes': len = 1.3; break;
+      case 'pizzicato': len = 0.65; break;
       case 'click': len = 0.05; break;
       case 'blip': len = 0.2; break;
       case 'thud': len = 0.45; break;
@@ -47,6 +51,20 @@ export function synth(events: AudioEvent[], duration: number, echo = true) {
         case 'pluck':
           s = (Math.sin(w * i) * Math.exp(-6 * tt) + 0.45 * Math.sin(w * 2 * i) * Math.exp(-9 * tt) + 0.25 * Math.sin(w * 3 * i) * Math.exp(-12 * tt) + 0.1 * Math.sin(w * 4 * i) * Math.exp(-16 * tt)) * 0.6 * Math.min(1, tt * 800);
           break;
+        case 'kalimba':
+          s = (Math.sin(w * i) * Math.exp(-4.2 * tt) + 0.28 * Math.sin(w * 2.76 * i) * Math.exp(-18 * tt) + 0.08 * Math.sin(w * 5.4 * i) * Math.exp(-42 * tt)) * 0.68 * Math.min(1, tt * 650);
+          break;
+        case 'celesta':
+          s = (Math.sin(w * i) * Math.exp(-3.4 * tt) + 0.42 * Math.sin(w * 2.0 * i) * Math.exp(-5.8 * tt) + 0.14 * Math.sin(w * 3.98 * i) * Math.exp(-14 * tt)) * 0.52 * Math.min(1, tt * 950);
+          break;
+        case 'rhodes': {
+          const trem = 1 + 0.08 * Math.sin(TWO_PI * 4.2 * tt);
+          s = (Math.sin(w * i) * Math.exp(-2.8 * tt) + 0.24 * Math.sin(w * 2 * i) * Math.exp(-5.5 * tt) + 0.3 * Math.sin(w * 4.0 * i) * Math.exp(-22 * tt)) * trem * 0.54 * Math.min(1, tt * 500);
+          break;
+        }
+        case 'pizzicato':
+          s = (Math.sin(w * i) * Math.exp(-8.5 * tt) + 0.48 * Math.sin(w * 2.0 * i) * Math.exp(-14 * tt) + 0.22 * Math.sin(w * 3.0 * i) * Math.exp(-24 * tt) + rnd() * Math.exp(-tt * 380) * 0.25) * 0.64 * Math.min(1, tt * 1000);
+          break;
         case 'click':
           s = (Math.sin(w * i) * Math.exp(-tt * 350) * 0.7 + rnd() * Math.exp(-tt * 900) * 0.5);
           break;
@@ -58,7 +76,7 @@ export function synth(events: AudioEvent[], duration: number, echo = true) {
           break;
         case 'pad': {
           const env = Math.max(0, Math.min(1, tt / 0.5, (d - tt) / 0.8));
-          s = (Math.sin(w * i) + 0.5 * Math.sin(w * 2.003 * i) + 0.25 * Math.sin(w * 3.01 * i)) * env * 0.25;
+          s = (Math.sin(w * i) + 0.5 * Math.sin(w * 2.003 * i) + 0.25 * Math.sin(w * 3.01 * i)) * env * 0.22;
           break;
         }
         case 'tick':
@@ -72,8 +90,8 @@ export function synth(events: AudioEvent[], duration: number, echo = true) {
   if (echo) {
     const dl = Math.floor(0.21 * SR);
     const dr = Math.floor(0.27 * SR);
-    for (let i = dl; i < n; i++) L[i] += 0.26 * L[i - dl];
-    for (let i = dr; i < n; i++) R[i] += 0.26 * R[i - dr];
+    for (let i = dl; i < n; i++) L[i] += 0.16 * L[i - dl];
+    for (let i = dr; i < n; i++) R[i] += 0.16 * R[i - dr];
   }
   let peak = 0;
   for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(L[i]), Math.abs(R[i]));

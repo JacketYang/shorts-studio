@@ -60,8 +60,16 @@ import {
   SECRET_LABELS,
   type AppSecrets,
 } from './secrets.ts';
-import { DEFAULT_METADATA_REWRITE_PROMPT } from '../domain/metadata-guard.ts';
-import { workbenchItemToStudioSpec, type WorkbenchEnqueueItem } from '../workbench/bridge.ts';
+import { auditPublishMetadata, DEFAULT_METADATA_REWRITE_PROMPT } from '../domain/metadata-guard.ts';
+import {
+  extractWorkbenchMetaFromSpec,
+  WORKBENCH_ENGINE_LABELS,
+  workbenchItemToStudioSpec,
+  type WorkbenchEnqueueItem,
+} from '../workbench/bridge.ts';
+import { songById } from '../workbench/catalog/songs.ts';
+import { clampTempoScale } from '../workbench/engine/presets.ts';
+import { THEMES } from '../workbench/engine/util.ts';
 
 export const DEFAULT_AI_CONFIG: AiProviderConfig = {
   provider: 'gemini',
@@ -1969,11 +1977,46 @@ export function enqueueWorkbenchItems(
       continue;
     }
 
-    const studioSpec = workbenchItemToStudioSpec(item, channel.slug, profile.brand.palette_family);
+    const studioSpec = workbenchItemToStudioSpec(item, channel.slug);
     const specId = `spec-wb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const renderId = `rnd-wb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const simHash = sha256Hex(`wb:${item.id}:${item.engine}:${item.seed}:${item.theme}`).slice(0, 16);
-    const fileSha = sha256Hex(`wb-file:${item.id}:${item.seed}`);
+    const fileSha = sha256Hex(`wb-file:${item.id}:${item.seed}:${item.theme}`);
+
+    const scheduledBySpec = new Map<string, string>();
+    for (const v of db.videos) {
+      if (v.state !== 'withdrawn') {
+        scheduledBySpec.set(v.spec_id, v.scheduled_at);
+      }
+    }
+    const channelHistory = db.specs
+      .filter((s) => s.channel_id === channelId)
+      .map((s) => {
+        const r = db.renders.find((rnd) => rnd.spec_id === s.id);
+        return {
+          spec_id: s.id,
+          spec: s.spec,
+          created_at: s.created_at,
+          scheduled_at: scheduledBySpec.get(s.id),
+          file_sha256: r?.file_sha256,
+        };
+      });
+    const crossChannelSpecs = db.specs
+      .filter((s) => s.channel_id !== channelId)
+      .map((s) => {
+        const r = db.renders.find((rnd) => rnd.spec_id === s.id);
+        return {
+          channel_id: s.channel_id,
+          spec: s.spec,
+          file_sha256: r?.file_sha256,
+        };
+      });
+    const novelty = evaluateNovelty(studioSpec, {
+      channelProfile: profile,
+      channelHistory,
+      crossChannelSpecs,
+      candidateFileSha256: fileSha,
+    });
 
     const specRec: SpecRecord = {
       id: specId,
@@ -2021,17 +2064,7 @@ export function enqueueWorkbenchItems(
       ],
       qa_passed: true,
       qa_score: 1,
-      novelty: {
-        score: 95,
-        verdict: 'pass',
-        violations: [],
-        similarity: {
-          visual_phash_distance: 18,
-          melody_similarity: 0.1,
-          text_jaccard: 0.1,
-        },
-        suggested_changes: [],
-      },
+      novelty,
       workbench_meta: {
         id: item.id,
         base_id: item.baseId,
@@ -2093,6 +2126,340 @@ export function enqueueWorkbenchItems(
   }
 
   return { createdCount, skippedCount, entries };
+}
+
+export interface UpdateSpecCreativePatch {
+  title?: string;
+  hookLine?: string;
+  description?: string;
+  tags?: string[] | string;
+  seed?: number;
+  theme?: number;
+  paletteFamily?: 'neon' | 'pastel' | 'mono' | 'warm' | 'cool';
+  durationSec?: number;
+  paramsPatch?: Record<string, unknown>;
+  audioPatch?: {
+    melodyId?: string;
+    tempoBpm?: number;
+    transpose?: number;
+    instrument?: string;
+    reverb?: number;
+  };
+  motionSpeedScale?: number;
+}
+
+const NATIVE_FAMILY_PALETTES: Record<
+  'neon' | 'pastel' | 'mono' | 'warm' | 'cool',
+  { colors: string[]; bg: [string, string] }
+> = {
+  neon: { colors: ['#00F5D4', '#F15BB5', '#FEE440', '#9B5DE5'], bg: ['#05060F', '#101437'] },
+  pastel: { colors: ['#FFADAD', '#FFD6A5', '#CAFFBF', '#9BF6FF'], bg: ['#1E1B2E', '#2A2438'] },
+  mono: { colors: ['#F8FAFC', '#CBD5E1', '#94A3B8', '#64748B'], bg: ['#09090B', '#18181B'] },
+  warm: { colors: ['#F97316', '#FBBF24', '#EF4444', '#FB7185'], bg: ['#1C0F0A', '#2D160C'] },
+  cool: { colors: ['#38BDF8', '#22D3EE', '#818CF8', '#34D399'], bg: ['#061423', '#0B253A'] },
+};
+
+export function updateSpecCreative(
+  db: StudioDatabase,
+  specId: string,
+  patch: UpdateSpecCreativePatch
+): {
+  spec: SpecRecord;
+  render: RenderRecord | null;
+  metadataAudit: ReturnType<typeof auditPublishMetadata>;
+} {
+  const specRec = db.specs.find((s) => s.id === specId);
+  if (!specRec) throw new Error('Spec not found');
+  const channel = db.channels.find((c) => c.id === specRec.channel_id);
+  const profile = db.profiles.find((p) => p.channel_id === specRec.channel_id);
+  if (!channel || !profile) throw new Error('Channel or profile not found');
+
+  const now = new Date().toISOString();
+  const nextTitle =
+    typeof patch.title === 'string' && patch.title.trim()
+      ? patch.title.trim().slice(0, 100)
+      : specRec.spec.publish.title;
+  const nextHook =
+    typeof patch.hookLine === 'string' && patch.hookLine.trim()
+      ? patch.hookLine.trim().slice(0, 80)
+      : specRec.spec.concept.hook_line;
+  const nextDesc =
+    typeof patch.description === 'string' && patch.description.trim()
+      ? patch.description.trim().slice(0, 5000)
+      : specRec.spec.publish.description;
+  const nextTags = Array.isArray(patch.tags)
+    ? patch.tags.map(String).map((t) => t.trim()).filter(Boolean)
+    : typeof patch.tags === 'string'
+      ? patch.tags
+          .split(/[,，\n]/)
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : specRec.spec.publish.tags;
+
+  const recentTitles = db.specs
+    .filter((s) => s.channel_id === specRec.channel_id && s.id !== specRec.id)
+    .map((s) => s.spec.publish.title)
+    .slice(0, 40);
+
+  const wbRender = db.renders.find((r) => r.spec_id === specId && r.workbench_meta) ?? null;
+  const fallbackWbMeta = !wbRender ? extractWorkbenchMetaFromSpec(specRec.spec) : null;
+
+  let activeRender: RenderRecord | null = wbRender ?? db.renders.find((r) => r.spec_id === specId) ?? null;
+
+  if (wbRender?.workbench_meta || fallbackWbMeta) {
+    const baseMeta = wbRender?.workbench_meta ?? fallbackWbMeta!;
+    const prevParams =
+      baseMeta.params && typeof baseMeta.params === 'object'
+        ? ({ ...(baseMeta.params as Record<string, unknown>) } as Record<string, unknown>)
+        : {};
+    const mergedParams: Record<string, unknown> = {
+      ...prevParams,
+      ...(patch.paramsPatch ?? {}),
+    };
+
+    if (typeof mergedParams.songId === 'string') {
+      mergedParams.song = songById(mergedParams.songId);
+      delete mergedParams.songId;
+    } else if (
+      mergedParams.song &&
+      typeof mergedParams.song === 'object' &&
+      !('notes' in mergedParams.song) &&
+      typeof (mergedParams.song as { id?: string }).id === 'string'
+    ) {
+      mergedParams.song = songById((mergedParams.song as { id: string }).id);
+    }
+
+    const oldScale = clampTempoScale(prevParams.tempoScale);
+    if (mergedParams.tempoScale !== undefined) {
+      mergedParams.tempoScale = clampTempoScale(mergedParams.tempoScale);
+    }
+    const newScale = clampTempoScale(mergedParams.tempoScale);
+
+    const nextTheme =
+      typeof patch.theme === 'number' && Number.isFinite(patch.theme)
+        ? ((Math.trunc(patch.theme) % THEMES.length) + THEMES.length) % THEMES.length
+        : baseMeta.theme;
+    const nextSeed =
+      typeof patch.seed === 'number' && Number.isFinite(patch.seed)
+        ? Math.max(1, Math.trunc(patch.seed))
+        : baseMeta.seed;
+    const nextDurationSec =
+      typeof patch.durationSec === 'number' && Number.isFinite(patch.durationSec)
+        ? Math.max(5, Math.min(180, Math.round(patch.durationSec)))
+        : Math.max(5, Math.min(180, Math.round((baseMeta.duration_sec * oldScale) / newScale)));
+
+    const enqueueItem: WorkbenchEnqueueItem = {
+      id: baseMeta.id,
+      baseId: baseMeta.base_id,
+      engine: baseMeta.engine,
+      params: mergedParams,
+      seed: nextSeed,
+      theme: nextTheme,
+      category: baseMeta.category,
+      catLabel: baseMeta.cat_label || WORKBENCH_ENGINE_LABELS[baseMeta.engine] || baseMeta.engine,
+      title: nextTitle,
+      hook: nextHook,
+      description: nextDesc,
+      tags: nextTags,
+      filename: baseMeta.filename,
+      durationSec: nextDurationSec,
+    };
+
+    const rebuiltSpec = workbenchItemToStudioSpec(enqueueItem, channel.slug, patch.paletteFamily);
+    rebuiltSpec.spec_key = specRec.spec.spec_key;
+    rebuiltSpec.concept.series = specRec.spec.concept.series;
+    rebuiltSpec.publish.schedule = specRec.spec.publish.schedule;
+    rebuiltSpec.provenance.created_at = specRec.spec.provenance.created_at;
+
+    specRec.spec = rebuiltSpec;
+    specRec.spec_hash = computeSpecHash(rebuiltSpec);
+    specRec.updated_at = now;
+
+    const mediaInvalidated =
+      nextTheme !== baseMeta.theme ||
+      nextSeed !== baseMeta.seed ||
+      nextHook !== baseMeta.hook ||
+      nextDurationSec !== baseMeta.duration_sec ||
+      JSON.stringify(mergedParams) !== JSON.stringify(prevParams);
+
+    if (wbRender) {
+      const simHash = sha256Hex(
+        `wb:${baseMeta.id}:${baseMeta.engine}:${nextSeed}:${nextTheme}:${JSON.stringify(mergedParams)}`
+      ).slice(0, 16);
+      const fileSha = sha256Hex(
+        `wb-file:${baseMeta.id}:${nextSeed}:${nextTheme}:${JSON.stringify(mergedParams)}`
+      );
+
+      const scheduledBySpec = new Map<string, string>();
+      for (const v of db.videos) {
+        if (v.state !== 'withdrawn') scheduledBySpec.set(v.spec_id, v.scheduled_at);
+      }
+      const channelHistory = db.specs
+        .filter((s) => s.channel_id === specRec.channel_id && s.id !== specRec.id)
+        .map((s) => {
+          const r = db.renders.find((rnd) => rnd.spec_id === s.id);
+          return {
+            spec_id: s.id,
+            spec: s.spec,
+            created_at: s.created_at,
+            scheduled_at: scheduledBySpec.get(s.id),
+            file_sha256: r?.file_sha256,
+          };
+        });
+      const crossChannelSpecs = db.specs
+        .filter((s) => s.channel_id !== specRec.channel_id)
+        .map((s) => {
+          const r = db.renders.find((rnd) => rnd.spec_id === s.id);
+          return {
+            channel_id: s.channel_id,
+            spec: s.spec,
+            file_sha256: r?.file_sha256,
+          };
+        });
+
+      wbRender.workbench_meta = {
+        ...baseMeta,
+        params: mergedParams,
+        seed: nextSeed,
+        theme: nextTheme,
+        hook: nextHook,
+        duration_sec: nextDurationSec,
+      };
+      wbRender.sim_hash = simHash;
+      wbRender.file_sha256 = fileSha;
+      wbRender.novelty = evaluateNovelty(rebuiltSpec, {
+        channelProfile: profile,
+        channelHistory,
+        crossChannelSpecs,
+        candidateFileSha256: fileSha,
+      });
+      const audioCheck = wbRender.qa_checks.find((c) => c.name === 'audio_events_present');
+      if (audioCheck) {
+        audioCheck.actual = `${nextDurationSec}s`;
+        audioCheck.passed = nextDurationSec >= 5;
+      }
+      if (mediaInvalidated) {
+        wbRender.media_ready = false;
+        wbRender.media_ext = null;
+        wbRender.media_bytes = null;
+        wbRender.media_uploaded_at = null;
+      }
+      activeRender = wbRender;
+    }
+  } else {
+    // Native Studio Spec path
+    specRec.spec.publish.title = nextTitle;
+    specRec.spec.publish.description = nextDesc;
+    specRec.spec.publish.tags = nextTags;
+    specRec.spec.concept.working_title = nextTitle;
+    specRec.spec.concept.hook_line = nextHook;
+
+    const hookEvt = specRec.spec.timeline.find((t) => t.type === 'text' && t.role === 'hook');
+    if (hookEvt && hookEvt.type === 'text') {
+      hookEvt.text = nextHook;
+    }
+
+    if (typeof patch.seed === 'number' && Number.isFinite(patch.seed)) {
+      specRec.spec.scene.seed = Math.max(1, Math.trunc(patch.seed));
+    }
+
+    if (patch.paletteFamily && NATIVE_FAMILY_PALETTES[patch.paletteFamily]) {
+      const fam = NATIVE_FAMILY_PALETTES[patch.paletteFamily];
+      specRec.spec.scene.style.palette.family = patch.paletteFamily;
+      specRec.spec.scene.style.palette.colors = [...fam.colors];
+      specRec.spec.scene.style.background = { type: 'gradient', colors: [...fam.bg] };
+      specRec.spec.axes.palette_family = patch.paletteFamily;
+    }
+
+    if (patch.audioPatch) {
+      if (!specRec.spec.audio.music) {
+        specRec.spec.audio.music = {
+          melody_ref: { source: 'library', id: db.melodies[0]?.id ?? 'pd:canon-in-d' },
+          transpose: 0,
+          tempo_bpm: 108,
+          instrument: 'marimba',
+          note_mapping: 'per_collision',
+          wrap: 'loop',
+          reverb: 0.12,
+        };
+      }
+      const m = specRec.spec.audio.music;
+      if (typeof patch.audioPatch.melodyId === 'string' && patch.audioPatch.melodyId.trim()) {
+        const mid = patch.audioPatch.melodyId.trim();
+        m.melody_ref = { source: 'library', id: mid };
+        specRec.spec.axes.music_piece = mid;
+      }
+      if (typeof patch.audioPatch.tempoBpm === 'number' && Number.isFinite(patch.audioPatch.tempoBpm)) {
+        m.tempo_bpm = Math.max(40, Math.min(240, Math.round(patch.audioPatch.tempoBpm)));
+      }
+      if (typeof patch.audioPatch.transpose === 'number' && Number.isFinite(patch.audioPatch.transpose)) {
+        m.transpose = Math.max(-12, Math.min(12, Math.round(patch.audioPatch.transpose)));
+      }
+      if (typeof patch.audioPatch.instrument === 'string' && patch.audioPatch.instrument.trim()) {
+        const inst = patch.audioPatch.instrument.trim();
+        m.instrument = inst;
+        specRec.spec.axes.instrument = inst;
+      }
+      if (typeof patch.audioPatch.reverb === 'number' && Number.isFinite(patch.audioPatch.reverb)) {
+        m.reverb = Math.max(0, Math.min(1, Number(patch.audioPatch.reverb.toFixed(2))));
+      }
+    }
+
+    if (typeof patch.motionSpeedScale === 'number' && Number.isFinite(patch.motionSpeedScale)) {
+      const s = clampTempoScale(patch.motionSpeedScale);
+      if (Math.abs(s - 1) > 0.001) {
+        const scParams = specRec.spec.scene.params as Record<string, Record<string, unknown>>;
+        if (specRec.spec.scene.template === 'melody-bounce' && scParams.balls && typeof scParams.balls.speed === 'number') {
+          scParams.balls.speed = Number(Math.max(0.25, Math.min(1.5, scParams.balls.speed * s)).toFixed(3));
+        } else if (specRec.spec.scene.template === 'orbit-sync' && scParams.orbits && typeof scParams.orbits.base_omega === 'number') {
+          scParams.orbits.base_omega = Number(Math.max(0.3, Math.min(4.0, scParams.orbits.base_omega * s)).toFixed(3));
+        } else if (specRec.spec.scene.template === 'pendulum-wave' && scParams.rule && typeof scParams.rule.cycle_sec === 'number') {
+          scParams.rule.cycle_sec = Number(Math.max(8, Math.min(60, scParams.rule.cycle_sec / s)).toFixed(2));
+        } else if (specRec.spec.scene.template === 'rings-escape' && scParams.rings && typeof scParams.rings.rotation_deg_per_s === 'number') {
+          scParams.rings.rotation_deg_per_s = Number(
+            Math.max(-120, Math.min(120, scParams.rings.rotation_deg_per_s * s)).toFixed(2)
+          );
+        }
+      }
+    }
+
+    specRec.spec_hash = computeSpecHash(specRec.spec);
+    specRec.updated_at = now;
+    activeRender = executeRenderForSpec(db, specId, 'local-creative-tuner');
+  }
+
+  for (const v of db.videos) {
+    if (v.spec_id === specRec.id && v.state !== 'published') {
+      v.title = specRec.spec.publish.title;
+      v.description = specRec.spec.publish.description;
+    }
+  }
+
+  const metadataAudit = auditPublishMetadata({
+    title: specRec.spec.publish.title,
+    hookLine: specRec.spec.concept.hook_line,
+    description: specRec.spec.publish.description,
+    tags: specRec.spec.publish.tags,
+    recentTitles,
+    forbiddenTopics: profile.brand.forbidden_topics,
+  });
+
+  db.audit_log.unshift({
+    id: `aud-${Date.now().toString(36)}`,
+    channel_id: specRec.channel_id,
+    actor: 'operator@shorts-studio',
+    action: 'spec_creative_updated',
+    entity: specRec.id,
+    payload: {
+      render_id: activeRender?.id ?? null,
+      instrument: specRec.spec.audio.music?.instrument,
+      music_piece: specRec.spec.axes.music_piece,
+      tempo_bpm: specRec.spec.audio.music?.tempo_bpm,
+    },
+    at: now,
+  });
+
+  return { spec: specRec, render: activeRender, metadataAudit };
 }
 
 

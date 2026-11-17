@@ -13,10 +13,12 @@ interface WorkbenchThumbProps {
 
 export const WorkbenchThumb: React.FC<WorkbenchThumbProps> = ({ spec, onOpen }) => {
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const [src, setSrc] = useState<string | undefined>(() => thumbCache.get(spec.id));
+  const theme = themeOf(spec);
+  const cacheKey = `${spec.id}|${spec.theme}|${spec.hook}|${JSON.stringify(spec.params)}`;
+  const [src, setSrc] = useState<string | undefined>(() => thumbCache.get(cacheKey));
 
   useEffect(() => {
-    const cached = thumbCache.get(spec.id);
+    const cached = thumbCache.get(cacheKey);
     if (cached) {
       setSrc(cached);
       return;
@@ -42,10 +44,10 @@ export const WorkbenchThumb: React.FC<WorkbenchThumbProps> = ({ spec, onOpen }) 
                     cv.height = 480;
                     drawStill(cv, scene, themeOf(spec), spec.hook, scene.duration * 0.55);
                     const url = cv.toDataURL('image/jpeg', 0.84);
-                    thumbCache.set(spec.id, url);
+                    thumbCache.set(cacheKey, url);
                     setSrc(url);
                   } catch {
-                    // Leave dark fallback placeholder if canvas fails
+                    // Leave fallback placeholder if canvas fails
                   }
                 }
                 setTimeout(resolve, 8);
@@ -61,7 +63,7 @@ export const WorkbenchThumb: React.FC<WorkbenchThumbProps> = ({ spec, onOpen }) 
       cancelled = true;
       observer.disconnect();
     };
-  }, [spec]);
+  }, [spec, cacheKey]);
 
   return (
     <button
@@ -69,7 +71,9 @@ export const WorkbenchThumb: React.FC<WorkbenchThumbProps> = ({ spec, onOpen }) 
       type="button"
       onClick={onOpen}
       aria-label={`${spec.title} 预览 / 试听`}
-      className="group relative block aspect-[9/16] w-full overflow-hidden rounded-md border border-slate-200 bg-slate-950 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+      className={`group relative block aspect-[9/16] w-full overflow-hidden rounded-md border border-slate-200 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 ${
+        theme.isLight ? 'bg-stone-100' : 'bg-slate-950'
+      }`}
     >
       {src ? (
         <img
@@ -78,8 +82,12 @@ export const WorkbenchThumb: React.FC<WorkbenchThumbProps> = ({ spec, onOpen }) 
           className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
         />
       ) : (
-        <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
-          加载缩略图…
+        <div
+          className={`flex h-full w-full items-center justify-center text-xs ${
+            theme.isLight ? 'text-slate-500' : 'text-slate-400'
+          }`}
+        >
+          渲染缩略图…
         </div>
       )}
       <div className="absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-opacity group-hover:bg-black/35 group-hover:opacity-100">

@@ -60,10 +60,10 @@ Goal: Rewrite the video's title, on-screen hook, description, and tags so each u
 
 Strict Rules:
 1. Title (<= 65 chars ideal, hard max 95 chars): NO #hashtags in the title, max 1 emoji, NEVER copy or share the first 3 words with any title in "recent_openers_to_avoid". Include a concrete number, contrast, or musical/physics payoff when accurate.
-2. Hook (<= 6 words, <= 45 chars): Short, punchy on-screen text for the top safe zone. Must create an instant open loop (question, prediction, or timing promise).
-3. Description: 2-3 crisp lines (what happens + why it's satisfying/surprising + one engaging question for comments), a short synthetic/code disclosure line ("Rendered in code with synthesized audio."), and ONLY 3-4 relevant #hashtags at the very bottom (never 6+ hashtags).
+2. Hook (<= 6 words, <= 45 chars): Short, punchy on-screen text for the top safe zone. Grounded in real mechanics or timing — zero generic bait.
+3. Description: 2-3 crisp lines (governing equation/mechanism + acoustic note + one thoughtful viewer question), a short synthesis note, and ONLY 3-4 relevant #hashtags at the very bottom (never #shorts/#oddlysatisfying spam).
 4. Tags: 8-14 focused lowercase search tags, combined length <= 400 chars.
-5. Policy & Safety: Zero fake promises ("100% impossible", "free money", "sub4sub", "watch before deleted"), zero copyrighted pop-song claims, zero misleading clickbait, zero forbidden channel topics.
+5. Policy & Safety: Zero AI-slop cliches ("Wait for it", "Watch until the end", "Like & subscribe", "90% pick wrong", "oddly satisfying", "mind blown"), zero fake promises ("100% impossible", "free money", "sub4sub", "watch before deleted"), zero copyrighted pop-song claims, zero forbidden channel topics.
 6. Output strictly valid JSON matching the schema.`;
 
 const SPAM_PATTERNS: Array<{ re: RegExp; label: string }> = [
@@ -76,6 +76,18 @@ const SPAM_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /\bcopyrighted\b/i, label: '疑似版权敏感词' },
   { re: /\breupload\b/i, label: '搬运敏感词' },
   { re: /\bonly\s+0\.?0*1%\s+can\b/i, label: '低质诱骗式文案' },
+];
+
+const SLOP_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /\bwatch\s+until\s+(?:the\s+)?end\b/gi, label: 'Watch until the end' },
+  { re: /\bwait\s+for\s+(?:it|the\s+end|the\s+last\s+note)\b/gi, label: 'Wait for it' },
+  { re: /\blike\s*(?:&|and)?\s*subscribe\s+for\s+more\b/gi, label: 'Like & subscribe 模板结尾' },
+  { re: /\b90%\s+(?:pick|get|fail|miss)\b/gi, label: '90% pick wrong 模板' },
+  { re: /\bevery\s+frame\s+is\s+generated\s+by\s+code\b/gi, label: '千篇一律免责句式' },
+  { re: /\boddly\s+satisfying\b/gi, label: 'oddly satisfying 模板词' },
+  { re: /\bmind\s*blown\b/gi, label: 'mind blown 模板词' },
+  { re: /\byou\s+won'?t\s+believe\b/gi, label: 'you wont believe 诱饵句' },
+  { re: /\bround\s+\d+\s+is\s+insane\b/gi, label: 'Round X is insane 模板' },
 ];
 
 const EMOJI_RE = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
@@ -164,6 +176,29 @@ export function auditPublishMetadata(input: MetadataInput): MetadataAuditReport 
       issues.push({ code: 'POLICY_SPAM_PHRASE', level: 'error', field: 'title', message: `命中审查高风险话术：${rule.label}` });
     }
   }
+  const copyTextForSlop = `${title}\n${hook}\n${desc}`;
+  const slopHits: string[] = [];
+  for (const rule of SLOP_PATTERNS) {
+    rule.re.lastIndex = 0;
+    if (rule.re.test(copyTextForSlop)) {
+      slopHits.push(rule.label);
+    }
+  }
+  if (slopHits.length >= 2) {
+    issues.push({
+      code: 'POLICY_AI_SLOP_CLICHE',
+      level: 'error',
+      field: 'description',
+      message: `命中多处同质化 AI 套话（${slopHits.join(' / ')}），请替换为具体音画细节`,
+    });
+  } else if (slopHits.length === 1) {
+    issues.push({
+      code: 'AI_SLOP_FILLER',
+      level: 'warn',
+      field: 'title',
+      message: `含模板套话「${slopHits[0]}」，建议改写为具体机制或音色描述`,
+    });
+  }
   const lowerCombined = combinedText.toLowerCase();
   for (const topic of forbidden) {
     if (topic.length >= 2 && lowerCombined.includes(topic)) {
@@ -240,6 +275,10 @@ export function sanitizeMetadataCandidate(input: {
   for (const rule of SPAM_PATTERNS) {
     title = title.replace(rule.re, '').replace(/\s+/g, ' ').trim();
   }
+  for (const rule of SLOP_PATTERNS) {
+    rule.re.lastIndex = 0;
+    title = title.replace(rule.re, '').replace(/\s+/g, ' ').trim();
+  }
   for (const topic of input.forbiddenTopics ?? []) {
     const cleanTopic = topic.trim();
     if (cleanTopic.length >= 2) {
@@ -251,10 +290,14 @@ export function sanitizeMetadataCandidate(input: {
     title = title.slice(0, 96).replace(/\s+\S*$/, '').trim() || title.slice(0, 96);
   }
   if (!title) {
-    title = 'Code-Rendered Physics & Sound Simulation';
+    title = 'Deterministic Physics & Harmonic Simulation';
   }
 
   let hookLine = (input.hookLine ?? '').replace(/#\w+/g, '').replace(/\s+/g, ' ').trim();
+  for (const rule of SLOP_PATTERNS) {
+    rule.re.lastIndex = 0;
+    hookLine = hookLine.replace(rule.re, '').replace(/\s+/g, ' ').trim();
+  }
   hookLine = stripExcessEmojis(hookLine, 1);
   if (hookLine.length > 48) {
     hookLine = hookLine.slice(0, 48).replace(/\s+\S*$/, '').trim() || hookLine.slice(0, 48);
@@ -279,11 +322,15 @@ export function sanitizeMetadataCandidate(input: {
     for (const rule of SPAM_PATTERNS) {
       cleanLine = cleanLine.replace(rule.re, '').replace(/\s{2,}/g, ' ');
     }
-    bodyLines.push(cleanLine.trimEnd());
+    for (const rule of SLOP_PATTERNS) {
+      rule.re.lastIndex = 0;
+      cleanLine = cleanLine.replace(rule.re, '').replace(/\s{2,}/g, ' ');
+    }
+    if (cleanLine.trim()) bodyLines.push(cleanLine.trimEnd());
   }
 
   while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1] === '') bodyLines.pop();
-  const cappedHashtags = (collectedHashtags.length > 0 ? collectedHashtags : ['#shorts', '#satisfying', '#physics', '#simulation']).slice(0, 4);
+  const cappedHashtags = (collectedHashtags.length > 0 ? collectedHashtags : ['#physics', '#simulation', '#kineticart', '#acoustics']).slice(0, 4);
   const cleanDesc = [...bodyLines, '', cappedHashtags.join(' ')].join('\n').trim().slice(0, 4900);
 
   // Dedupe tags & enforce <= 450 chars and <= 15 tags
@@ -391,45 +438,45 @@ function extractSubject(input: DiversifyMetadataInput): ExtractedSubject {
 }
 
 const QUESTION_PROMPTS = [
-  'Which moment gave you chills? Drop the timestamp below.',
-  'Did you predict the ending before the final 3 seconds?',
-  'Listen with headphones — did you hear the harmonic shift?',
-  'Comment what pattern or melody you want rendered next.',
-  'How many loops did you watch before noticing the symmetry?',
-  'Rate the satisfaction from 1 to 10 in the comments.',
+  'Did the harmonic shift around the midpoint catch your ear?',
+  'Which parameter change would make the most interesting follow-up study?',
+  'Notice how the phase intervals tighten just before full alignment.',
+  'Listening on headphones brings out the left-right panning across impacts.',
+  'What classical motif or physical invariant should we test next?',
+  'Look closely at the symmetry plane when the cycle turns around.',
 ];
 
 const DISCLOSURES = [
-  '100% procedural math & physics simulation with synthesized audio — zero stock footage.',
-  'Every frame and sound wave is computed deterministically in code.',
-  'Generated via real-time physics & WebAudio synthesis (no camera, no reuploads).',
+  'Numerical integration at 60 steps/s paired with real-time WebAudio synthesis.',
+  'Deterministic kinematics and frequency-locked synthesis — zero external samples.',
+  'Computed live from the governing equations with tuned acoustic envelopes.',
 ];
 
 const HASHTAG_POOLS: Record<string, string[][]> = {
   music: [
-    ['#shorts', '#music', '#satisfying', '#synthesizer'],
-    ['#shorts', '#oddlysatisfying', '#melody', '#asmr'],
-    ['#shorts', '#bouncingball', '#physics', '#sounddesign'],
+    ['#kineticmusic', '#acoustics', '#sounddesign'],
+    ['#polyphony', '#synthesizer', '#harmonics'],
+    ['#physicsmusic', '#instrument', '#timbre'],
   ],
   sort: [
-    ['#shorts', '#ballsort', '#satisfying', '#plinko'],
-    ['#shorts', '#colorsorting', '#oddlysatisfying', '#asmr'],
-    ['#shorts', '#physics', '#marbles', '#loop'],
+    ['#plinko', '#kinematics', '#colorsort'],
+    ['#probability', '#pegboard', '#physics'],
+    ['#marbles', '#trajectory', '#simulation'],
   ],
   algo: [
-    ['#shorts', '#algorithm', '#sorting', '#computerscience'],
-    ['#shorts', '#coding', '#soundofsorting', '#satisfying'],
-    ['#shorts', '#visualization', '#math', '#asmr'],
+    ['#algorithms', '#computerscience', '#sonification'],
+    ['#sorting', '#datastructures', '#sounddesign'],
+    ['#coding', '#visualization', '#acoustics'],
   ],
   phys: [
-    ['#shorts', '#physics', '#science', '#satisfying'],
-    ['#shorts', '#simulation', '#hypnotic', '#oddlysatisfying'],
-    ['#shorts', '#chaostheory', '#pendulum', '#loop'],
+    ['#physics', '#harmonicmotion', '#simulation'],
+    ['#chaostheory', '#pendulum', '#mechanics'],
+    ['#science', '#dynamics', '#phasespace'],
   ],
   math: [
-    ['#shorts', '#mathart', '#geometry', '#satisfying'],
-    ['#shorts', '#mathematics', '#spirograph', '#hypnotic'],
-    ['#shorts', '#fractals', '#simulation', '#loop'],
+    ['#mathart', '#geometry', '#parametric'],
+    ['#mathematics', '#spirograph', '#fourier'],
+    ['#dynamicalsystems', '#calculus', '#simulation'],
   ],
 };
 
@@ -438,106 +485,97 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
   const eng = input.engine;
   const n = subj.n ?? 24;
   const dur = subj.dur ?? 26;
+  const pObj = (input.params && typeof input.params === 'object' ? input.params : {}) as Record<string, unknown>;
+  const voiceName = typeof pObj.voice === 'string' ? pObj.voice : 'marimba';
 
   if (eng === 'hop' || eng === 'rain' || eng === 'ring' || eng === 'multiply') {
     const noun =
       eng === 'rain'
-        ? 'Falling Balls'
+        ? 'Falling Spheres'
         : eng === 'ring'
-          ? 'Orbiting Ball'
+          ? 'Chord Reflections'
           : eng === 'multiply'
-            ? 'Multiplying Balls'
-            : 'Bouncing Ball';
+            ? 'Particle Splitting'
+            : 'Ballistic Arcs';
     return [
       {
-        title: `Can ${noun} Nail Every Beat of ${song}? 🎶`,
-        hook: `Wait for the final bar`,
-        pattern: 'question',
-        body: `Each impact triggers an exact synthesized pitch from ${song}, timed to the millisecond.`,
-      },
-      {
-        title: `How ${song} Sounds When Driven Purely by Gravity`,
-        hook: `Gravity plays the melody`,
+        title: `Kinetic ${voiceName} Study: ${noun} Performing ${song} 🎶`,
+        hook: `${noun} voice ${song}`,
         pattern: 'statement',
-        body: `Instead of a human performer, gravity and collision physics drive every single note of ${song}.`,
+        body: `Each impact triggers a synthesized ${voiceName} voice tuned directly to ${song}.`,
       },
       {
-        title: `1 Rule Turns Collisions Into ${song} ✨`,
-        hook: `Every bounce = 1 note`,
+        title: `How Gravity Solves the Rhythm of ${song} via ${noun}`,
+        hook: `Gravity times ${voiceName}`,
+        pattern: 'question',
+        body: `Kinematics replace a human performer: collision timestamps drive every interval of ${song}.`,
+      },
+      {
+        title: `Arranged for ${voiceName}: ${song} Across ${dur}s of Motion ✨`,
+        hook: `${voiceName} harmonic loop`,
         pattern: 'number-contrast',
-        body: `Watch the trajectory build tension until the melody locks into full harmony.`,
+        body: `Flight arcs and harmonic overtones stay locked across the ${dur}-second cycle.`,
       },
       {
-        title: `Name ${song} Before the 5-Second Mark 🎹`,
-        hook: `Guess the melody in 5s`,
+        title: `Hearing ${song} Inside Exact Geometric Timing 🎹`,
+        hook: `Acoustic timing study`,
         pattern: 'challenge',
-        body: `Test your ear: every visual strike corresponds to a frequency in ${song}.`,
+        body: `Listen for how phrasing tightens whenever multiple bounces converge on the downbeat.`,
       },
       {
-        title: `Inside the Geometry of ${song} (${dur}s Loop)`,
-        hook: `Audio meets geometry`,
+        title: `From Stillness to Resonance: ${song} Driven by ${noun}`,
+        hook: `Resonance in motion`,
         pattern: 'statement',
-        body: `Motion trajectories and harmonic intervals stay phase-locked across the entire ${dur}-second cycle.`,
+        body: `Velocity and boundary geometry convert physical motion into clean ${voiceName} phrasing.`,
       },
       {
-        title: `What Happens When ${noun} Speed Up on ${song}? ⚡`,
-        hook: `Tempo escalates every second`,
+        title: `What Makes ${song} Work on Pure ${noun}? (${voiceName}) ⚡`,
+        hook: `Physics meets phrasing`,
         pattern: 'question',
-        body: `As collision frequency climbs, the rhythm compresses into an intricate sonic cascade.`,
+        body: `Adjusting height or reflection angle shifts the density while keeping pitch intervals intact.`,
       },
     ];
   }
 
   if (eng === 'plinko' || input.category === 'sort') {
     const bins = subj.bins ?? 4;
+    const pegLayout = typeof pObj.pegLayout === 'string' ? pObj.pegLayout : 'stagger';
     return [
       {
-        title: `${n} Marbles, ${bins} Bins: Zero Sorting Mistakes`,
-        hook: `${n} balls. ${bins} bins.`,
+        title: `${n} Marbles Route Cleanly Across ${bins} ${pegLayout} Peg Bins`,
+        hook: `${n} spheres, ${bins} lanes`,
         pattern: 'number-contrast',
-        body: `${n} color-coded spheres weave through offset pegs and settle cleanly into ${bins} matched bins.`,
+        body: `${n} color-coded spheres weave through a ${pegLayout} peg lattice and settle into ${bins} matched bins.`,
       },
       {
-        title: `How Do ${n} Falling Balls Sort Into ${bins} Colors? 🌈`,
-        hook: `How do they self-sort?`,
+        title: `Peg Deflection Math: Separating ${n} Drops Into ${bins} Colors`,
+        hook: `${pegLayout} lattice sort`,
         pattern: 'question',
-        body: `Pre-calibrated peg deflections guide chaotic drops into crisp chromatic order.`,
+        body: `Pre-calibrated peg impacts steer mixed drops into crisp chromatic columns.`,
       },
       {
-        title: `Pick a Bin Before All ${n} Balls Drop 👇`,
-        hook: `Pick your winning color`,
-        pattern: 'challenge',
-        body: `Each peg impact triggers a harmonic chime while the ${bins} color columns race to fill up.`,
-      },
-      {
-        title: `Chaos Above, ${bins} Perfect Stacks Below`,
-        hook: `Chaos becomes order`,
+        title: `Chromatic Funneling: ${bins} Target Columns Collect ${n} Spheres`,
+        hook: `${bins} chromatic stacks`,
         pattern: 'statement',
-        body: `Watch ${n} trajectories collide at the funnel before snapping into neat parallel columns.`,
+        body: `Each peg collision sounds a harmonic note on ${voiceName} as columns fill steadily.`,
       },
       {
-        title: `Why Zero Balls Miss Their Bin (${n} Drops)`,
-        hook: `Zero errors allowed`,
+        title: `Inside a ${pegLayout} Quincunx: ${n} Rigid Bodies, ${bins} Bins`,
+        hook: `Zero cross-bin errors`,
         pattern: 'mystery',
-        body: `Deterministic trajectories ensure every single marble reaches its matching color bin on cue.`,
+        body: `Deterministic trajectories ensure every single marble reaches its assigned target column.`,
       },
       {
-        title: `Peg Maze Physics: ${n} Spheres Finding ${bins} Targets 🎯`,
-        hook: `Every bounce guides home`,
+        title: `Acoustic Routing on ${voiceName}: ${n} Bounces Finding ${bins} Goals`,
+        hook: `Tuned pegboard collisions`,
+        pattern: 'challenge',
+        body: `Watch chaotic peg ricochets collapse into clean ordered columns scored by ${voiceName}.`,
+      },
+      {
+        title: `Ballistic Sorting Architecture (${pegLayout}) for ${n} Rigid Marbles`,
+        hook: `Ballistic path separation`,
         pattern: 'statement',
-        body: `Gravity and angled pins turn a messy ${n}-ball release into ${bins} clean vertical bands.`,
-      },
-      {
-        title: `Which of the ${bins} Color Columns Fills Up First?`,
-        hook: `First column to finish?`,
-        pattern: 'question',
-        body: `Follow your chosen color through ${n} cascading bounces from top funnel to bottom slot.`,
-      },
-      {
-        title: `Satisfying Marble Cascade: ${bins} Lanes, ${n} Hits`,
-        hook: `Pure Plinko harmony`,
-        pattern: 'number-contrast',
-        body: `Timed collision spacing keeps the stream rhythmic from first drop to final marble.`,
+        body: `Every release seed is solved backward from bin geometry so ${bins} hues land neatly apart.`,
       },
     ];
   }
@@ -546,109 +584,137 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     const algo = (subj.algo ?? 'Sorting').toUpperCase();
     return [
       {
-        title: `Hear ${n} Shuffled Bars Become Order via ${algo}`,
-        hook: `Listen to ${algo}`,
+        title: `Auditory Trace of ${algo} Ordering ${n} Elements (${voiceName})`,
+        hook: `${algo} over ${n} keys`,
         pattern: 'statement',
-        body: `Every array comparison and swap emits a pitched tone as ${n} values organize themselves.`,
+        body: `Every array comparison and swap emits a pitched ${voiceName} tone as ${n} values align.`,
       },
       {
-        title: `Why ${algo} Sounds Completely Different on ${n} Items 🔊`,
-        hook: `${algo} vs ${n} elements`,
+        title: `Why ${algo} Creates a Distinct Harmonic Footprint on ${n} Items 🔊`,
+        hook: `Acoustic footprint of ${algo}`,
         pattern: 'question',
-        body: `Algorithmic complexity leaves an unmistakable acoustic fingerprint from chaos to sorted rainbow.`,
+        body: `Partitioning and swap patterns produce an unmistakable sonic signature from disorder to gradient.`,
       },
       {
-        title: `Can You Spot the Pivot Phase in ${algo}?`,
-        hook: `Spot the pivot moment`,
+        title: `Pivot & Merge Cadence: ${algo} Resolving ${n} Unsorted Values`,
+        hook: `Listen to the pivot phase`,
         pattern: 'challenge',
-        body: `Track how ${algo} partitions ${n} scrambled elements step by step until the final sweep.`,
+        body: `Track how ${algo} structures ${n} scrambled keys step by step until the final verification sweep.`,
       },
       {
-        title: `From Pure Noise to Clean Sweep in ${n} Steps (${algo})`,
-        hook: `Chaos to clean sweep`,
+        title: `${n} Scrambled Hues Organized Live by ${algo} Logic`,
+        hook: `${n} keys sorted in code`,
         pattern: 'number-contrast',
-        body: `Auditory algorithm visualization turns raw computer science comparisons into crisp synth sweeps.`,
+        body: `Algorithm sonification pairs computer science comparisons with crisp scale pitches.`,
       },
       {
-        title: `Code Sonification: ${algo} Organizing ${n} Random Values`,
-        hook: `${algo} in audio form`,
+        title: `Turning Array Inversions Into ${voiceName} Arpeggios: ${algo} (${n})`,
+        hook: `Swaps drive pitch`,
         pattern: 'statement',
-        body: `Watch scrambled hues snap into gradient alignment while each swap triggers a marimba pitch.`,
+        body: `Notice the cadence tighten as ${algo} eliminates remaining out-of-order pairs across ${n} bars.`,
       },
       {
-        title: `${n} Unsorted Elements Meet ${algo} Logic ⚡`,
-        hook: `Watch the rainbow lock`,
-        pattern: 'mystery',
-        body: `Notice the final verification pass sweep cleanly up the frequency scale once sorted.`,
+        title: `From Random Permutation to Gradient: ${algo} Timing Study`,
+        hook: `Complexity made audible`,
+        pattern: 'question',
+        body: `Sub-quadratic partitions versus linear sweeps leave clear rhythmic contrasts in sound.`,
       },
     ];
   }
 
-  if (eng === 'pendwave' || eng === 'orbits' || eng === 'dpend' || eng === 'lorenz') {
-    const label =
-      eng === 'pendwave'
-        ? 'Pendulums'
-        : eng === 'orbits'
-          ? 'Orbits'
-          : eng === 'dpend'
-            ? 'Double Pendulums'
-            : 'Trajectories';
-    const singular =
-      eng === 'pendwave'
-        ? 'Harmonic Wave'
-        : eng === 'orbits'
-          ? 'Planetary Resonance'
-          : eng === 'dpend'
-            ? 'Butterfly Effect'
-            : 'Lorenz Attractor';
+  if (eng === 'pendwave') {
+    const view = typeof pObj.view === 'string' ? pObj.view : 'rows';
+    const noteId = input.id.split('~')[0];
     return [
       {
-        title: `Wait for Second ${dur}: ${n} ${label} Snap Back Into Sync`,
-        hook: `Wait for second ${dur}`,
+        title: `Realignment at t=${dur}s: ${n} Detuned Pendulums Meet (${view})`,
+        hook: `Full reunion at ${dur}s`,
         pattern: 'countdown',
-        body: `${n} independent oscillators drift through shifting waves before realigning simultaneously at ${dur}s.`,
+        body: `${n} independent oscillators sweep through shifting waves before converging cleanly at ${dur}s.`,
       },
       {
-        title: `Why ${n} ${label} Form Hidden Waves Before Chaos`,
-        hook: `Hidden waves appear`,
+        title: `Traveling Helices to Standing Waves Across ${n} Oscillators`,
+        hook: `Phase symmetry live`,
         pattern: 'question',
-        body: `Tiny initial differences compound into intricate phase patterns over a ${dur}-second window.`,
+        body: `Incremental period differences weave helical patterns over a ${dur}-second harmonic window.`,
       },
       {
-        title: `Order -> Drift -> Realignment Across ${n} ${label} ✨`,
-        hook: `Order, drift, return`,
+        title: `Harmonic Phase Choir on ${voiceName}: ${n} Synchronized Bobs ✨`,
+        hook: `${n}-pendulum resonance`,
         pattern: 'statement',
-        body: `Every phase crossing rings an overtone while ${n} coupled paths evolve smoothly in 9:16.`,
+        body: `Every center-crossing sounds a ${voiceName} interval while ${n} paths evolve continuously.`,
       },
       {
-        title: `Could You Track All ${n} ${label} Without Blinking?`,
-        hook: `Track the outer wave`,
-        pattern: 'challenge',
-        body: `Keep your eye on the phase boundary as the visual density flips mid-cycle.`,
-      },
-      {
-        title: `${singular} in ${dur}s: ${n} Coupled Paths Collide With Rhythm`,
-        hook: `${singular} live`,
-        pattern: 'number-contrast',
-        body: `Integer frequency ratios create snakes, double helices, and sudden full-line reunions.`,
-      },
-      {
-        title: `Halfway Through, ${n} ${label} Split Into Two Opposite Patterns`,
-        hook: `Watch the halfway split`,
-        pattern: 'mystery',
-        body: `At T/2 odd and even indices invert phases completely before converging back home.`,
-      },
-      {
-        title: `Hypnotic Phase Math: ${n} Moving Dots, Zero Randomness 🌊`,
+        title: `Integer Frequency Ratios Split ${n} Bobs Into Twin Braids`,
         hook: `Pure phase geometry`,
-        pattern: 'statement',
-        body: `What looks chaotic at second 9 is actually strict periodic arithmetic playing out live.`,
+        pattern: 'number-contrast',
+        body: `At half-period T/2 odd and even indices invert completely before returning home.`,
       },
       {
-        title: `How Long Until ${n} Diverging ${label} Meet Again? (${dur}s)`,
-        hook: `Count until reunion`,
+        title: `How ${dur}s Acoustic Beats Emerge From ${n} Uncoupled Strings`,
+        hook: `No springs between bobs`,
         pattern: 'question',
-        body: `Each neighbor gains one extra cycle over ${dur} seconds so all ${n} finish together.`,
+        body: `Zero mechanical coupling yet strict rational period steps create collective choreography (${noteId}).`,
+      },
+      {
+        title: `Mach’s Wave Machine Rebuilt in ${view} Geometry (${dur}s Run)`,
+        hook: `Physics of phase drift`,
+        pattern: 'mystery',
+        body: `Watch traveling crests fracture into polyrhythms and snapping triplets every quarter period.`,
+      },
+      {
+        title: `Counting Phase Closures: T/3, T/2 & Full Sync at ${dur}s`,
+        hook: `Fractional harmonic locks`,
+        pattern: 'challenge',
+        body: `Small integer step differences between adjacent pendulums turn chaos into momentary braids.`,
+      },
+      {
+        title: `Polyrhythmic Envelope Sculpted by ${n} Independent Lengths (${voiceName})`,
+        hook: `${voiceName} phase sweep`,
+        pattern: 'statement',
+        body: `Rendered in continuous 60-fps kinematics with harmonic scale triggers at equilibrium crossings.`,
+      },
+    ];
+  }
+
+  if (eng === 'orbits' || eng === 'dpend' || eng === 'lorenz') {
+    const label = eng === 'orbits' ? 'Orbits' : eng === 'dpend' ? 'Double Pendulums' : 'Trajectories';
+    const singular =
+      eng === 'orbits'
+        ? 'Planetary Resonance'
+        : eng === 'dpend'
+          ? 'Lyapunov Divergence'
+          : 'Lorenz Attractor';
+    return [
+      {
+        title: `${singular} Study Across ${n} ${label} (${dur}s Window) ✨`,
+        hook: `${singular}`,
+        pattern: 'statement',
+        body: `Tiny initial differences compound into macroscopic divergence while triggering ${voiceName} cues.`,
+      },
+      {
+        title: `Mapping Sensitive Dependence in ${n} Coupled ${label}`,
+        hook: `Phase space evolution`,
+        pattern: 'question',
+        body: `Differential equations integrate live across ${dur} seconds to show attractor geometry.`,
+      },
+      {
+        title: `Synchronized Until Chaos Breaks: ${n} ${label} in Orbit`,
+        hook: `Precision vs divergence`,
+        pattern: 'challenge',
+        body: `Spot the exact moment neighboring trajectories shear apart despite nearly identical starts.`,
+      },
+      {
+        title: `Strange Attractor Kinematics & ${voiceName} Sonification (${n} Paths)`,
+        hook: `${voiceName} dynamics`,
+        pattern: 'number-contrast',
+        body: `Angular velocity and orbital sweeps drive tuned harmonic chimes throughout the trajectory.`,
+      },
+      {
+        title: `Differential Phase Portrait: ${label} Sweeping Through Equilibrium`,
+        hook: `RK4 solver live`,
+        pattern: 'mystery',
+        body: `Fourth-order Runge-Kutta integration preserves smooth orbital energy across all ${n} tracers.`,
       },
     ];
   }
@@ -664,22 +730,22 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
         body: `Rolling gear kinematics (${ratioDesc}) close cleanly after drawing ${pet} symmetrical petals.`,
       },
       {
-        title: `Watch ${pet} Petals Lock Into Place (${ratioDesc})`,
-        hook: `Watch the curve close`,
+        title: `Trigonometric Closure: ${pet} Petals From ${ratioDesc}`,
+        hook: `${ratioDesc} petals lock`,
         pattern: 'statement',
-        body: `Every loop step adds glowing precision until the hypotrochoid curve meets its origin.`,
+        body: `Parametric gear motion (${ratioDesc}) closes cleanly after tracing ${pet} symmetrical petals.`,
       },
       {
-        title: `Count the ${pet} Petals Before the Final Turn ✨`,
+        title: `Count All ${pet} Symmetrical Lobes (${ratioDesc}) ✨`,
         hook: `One rule, ${pet} petals`,
         pattern: 'challenge',
         body: `Polar & gear equations prove how integer ratios create botanical symmetry.`,
       },
       {
-        title: `1 Continuous Line Draws ${pet} Symmetrical Petals (${ratioDesc})`,
+        title: `1 Continuous Curve Plots ${pet} Balanced Petals (${ratioDesc})`,
         hook: `1 line draws ${pet} petals`,
         pattern: 'number-contrast',
-        body: `No brushes or keyframes — just parametric trig equations plotted at 60 steps per second.`,
+        body: `Parametric trig equations plotted at 60 steps/s guide the trace back to its origin.`,
       },
     ];
   }
@@ -688,22 +754,22 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     const r = subj.ratio ?? '3:2';
     return [
       {
-        title: `Visualizing a ${r} Musical Interval as a Knot 🎻`,
+        title: `Visualizing a ${r} Musical Interval as an X-Y Knot 🎻`,
         hook: `Ratio ${r} in motion`,
         pattern: 'statement',
         body: `Two perpendicular sine waves oscillating at ${r} weave this shifting Lissajous figure.`,
       },
       {
-        title: `What Does a ${r} Frequency Ratio Look Like?`,
-        hook: `Sound has a shape`,
+        title: `What Does a ${r} Frequency Ratio Look Like in Phase Space?`,
+        hook: `Sound has a geometry`,
         pattern: 'question',
-        body: `Phase drift rotates the ${r} curve in 3D space while matching synth overtones play.`,
+        body: `Phase drift rotates the ${r} curve in 3D space while matching ${voiceName} overtones play.`,
       },
       {
-        title: `Pure Sound Geometry: Oscilloscope ${r} Loop ✨`,
-        hook: `Watch the knot twist`,
+        title: `Oscilloscope Harmonics: ${r} Phase-Sweep Portrait ✨`,
+        hook: `Continuous ${r} drift`,
         pattern: 'mystery',
-        body: `Harmonic frequency ratios produce closed knots whose lobes match the numerator and denominator.`,
+        body: `Harmonic frequency ratios produce closed knots whose lobes match numerator and denominator.`,
       },
     ];
   }
@@ -719,16 +785,16 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
         body: `${terms} epicycles spinning at harmonic speeds combine tip-to-tail to sketch ${shape}.`,
       },
       {
-        title: `How Can Rotating Circles Only Draw ${shape}? 🔄`,
-        hook: `Only circles. Watch.`,
+        title: `How Rotating Circles Reconstruct ${shape} Without Straight Lines 🔄`,
+        hook: `${terms} rotating phasors`,
         pattern: 'question',
         body: `Discrete Fourier transform turns any closed silhouette into stacked rotating vectors.`,
       },
       {
-        title: `Guess What ${terms} Stacked Circles Are Drawing 👀`,
-        hook: `Guess the silhouette`,
+        title: `Complex Phasors Synthesizing ${shape} Over ${dur}s (${voiceName})`,
+        hook: `Discrete Fourier trace`,
         pattern: 'challenge',
-        body: `Wait for the outer pen tip to complete its full ${dur}-second revolution around ${shape}.`,
+        body: `Follow the outer pen tip as all ${terms} stacked vectors complete a ${dur}-second revolution.`,
       },
     ];
   }
@@ -738,22 +804,22 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     const kMax = subj.kMax ?? 10;
     return [
       {
-        title: `${pts} Circle Points + Multiplication = Cardioid Surprise ❤️`,
-        hook: `Times tables make art`,
+        title: `${pts} Circle Points + Multiplication = Cardioid Caustic ❤️`,
+        hook: `Times tables make curves`,
         pattern: 'statement',
-        body: `Connecting i to k×i mod ${pts} as k sweeps from 2 to ${kMax} reveals hidden caustic curves.`,
+        body: `Connecting i to k×i mod ${pts} as k sweeps from 2 to ${kMax} reveals sharp optical caustics.`,
       },
       {
-        title: `What Happens When Multiplication Climbs to ${kMax} on ${pts} Dots?`,
-        hook: `Watch k sweep to ${kMax}`,
+        title: `How Multiplier k=2→${kMax} Transforms ${pts} Circle Chords`,
+        hook: `k sweeps from 2 to ${kMax}`,
         pattern: 'question',
-        body: `Modular arithmetic turns simple straight chords into glowing envelope curves.`,
+        body: `Modular arithmetic turns simple straight chords into smooth epicycloid envelopes.`,
       },
       {
-        title: `Cardioid to Nephroid: ${pts} Chords Shifting Live ✨`,
+        title: `Cardioid to Nephroid: ${pts} Modular Chords Shifting Live ✨`,
         hook: `Simple rule, deep order`,
         pattern: 'mystery',
-        body: `Notice how integer multipliers k=2, 3, 4 flash clear petal cusps before dissolving.`,
+        body: `Integer multipliers k=2, 3, 4 flash clear petal cusps as straight chords tangent the envelope.`,
       },
     ];
   }
@@ -764,19 +830,19 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     return [
       {
         title: `Why ${seeds} Seeds Need Exactly 137.5° (${rangeTxt}) 🌻`,
-        hook: `Why 137.5 degrees?`,
+        hook: `Why 137.508 degrees?`,
         pattern: 'question',
         body: `With ${seeds} points packed radially, ${rangeTxt} shows why nature favors the golden ratio.`,
       },
       {
-        title: `Change 0.2° and Watch ${seeds} Sunflower Spirals Break`,
-        hook: `0.2° breaks the spiral`,
+        title: `0.2° Drift Breaks All ${seeds} Fibonacci Sunflower Spirals`,
+        hook: `0.2° breaks the lattice`,
         pattern: 'number-contrast',
         body: `Packing ${seeds} seeds around the center reveals Fibonacci spirals only near 137.508°.`,
       },
       {
-        title: `${seeds} Golden-Angle Points Blooming in Real Time 🌻`,
-        hook: `Nature's packing code`,
+        title: `${seeds} Golden-Angle Points Blooming via Vogel’s Law 🌻`,
+        hook: `Botanical packing code`,
         pattern: 'statement',
         body: `Every new point turns by the irrational golden angle so gaps never align into spokes.`,
       },
@@ -787,16 +853,16 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     const limit = subj.n ?? 100;
     return [
       {
-        title: `Every Composite Falls Away Under ${limit} (Prime Sieve) 🔢`,
+        title: `Composite Multiples Stripped Below ${limit} (Prime Sieve) 🔢`,
         hook: `Primes under ${limit}`,
         pattern: 'statement',
-        body: `Crossing off multiples from 2 upward leaves only the prime numbers below ${limit}.`,
+        body: `Crossing off multiples from 2 upward isolates every prime number below ${limit}.`,
       },
       {
-        title: `How a 2,000-Year-Old Grid Finds All Primes Below ${limit}`,
+        title: `How a 2,000-Year-Old Grid Filters Every Prime Under ${limit}`,
         hook: `Ancient prime filter`,
         pattern: 'question',
-        body: `Each strike plays a tone as the Sieve of Eratosthenes clears composite numbers up to ${limit}.`,
+        body: `Each strike sounds ${voiceName} as the Sieve of Eratosthenes clears composites up to ${limit}.`,
       },
     ];
   }
@@ -806,16 +872,16 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     const mass = subj.mass ?? '10,000 kg';
     return [
       {
-        title: `${mass} vs 1 kg: ${cols} Bounces Compute Pi 🤯`,
+        title: `${mass} vs 1 kg: ${cols} Elastic Bounces Compute Pi`,
         hook: `${cols} bounces = Pi`,
         pattern: 'number-contrast',
         body: `Galperin's elastic collision theorem: a ${mass} block triggers ${cols} hits — exact digits of π.`,
       },
       {
-        title: `Why Two Sliding Blocks Know the Digits of Pi (${cols} Hits)`,
-        hook: `Physics computes Pi`,
+        title: `Why Two Sliding Blocks Encode the Digits of Pi (${cols} Hits)`,
+        hook: `Momentum computes Pi`,
         pattern: 'question',
-        body: `Conservation of momentum & energy turns ${mass} vs 1 kg into a mechanical π calculator.`,
+        body: `Conservation of momentum & energy turns ${mass} vs 1 kg into a mechanical π counter.`,
       },
     ];
   }
@@ -826,15 +892,15 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     return [
       {
         title: `${balls} Random Drops Across ${rows} Rows Form a Bell Curve 🔔`,
-        hook: `Chance draws order`,
+        hook: `Binomial trials live`,
         pattern: 'statement',
         body: `${balls} marbles take ${rows} random left/right bounces yet build a clean normal distribution.`,
       },
       {
-        title: `How ${balls} Unpredictable Balls Always Agree on One Shape`,
-        hook: `${balls} coin flips live`,
+        title: `How ${balls} 50/50 Peg Bounces Converge on One Bell Envelope`,
+        hook: `${balls} independent trials`,
         pattern: 'question',
-        body: `Binomial probability turns individual chaos across ${rows} peg rows into smooth symmetry.`,
+        body: `Binomial probability turns individual deflections across ${rows} peg rows into smooth symmetry.`,
       },
     ];
   }
@@ -844,13 +910,13 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
     return isTauto
       ? [
           {
-            title: `Drop From Any Height — Why All ${n} Balls Tie at the Bottom 🥣`,
+            title: `Release From Any Height — All ${n} Spheres Tie at the Bottom 🥣`,
             hook: `Any height, exact tie`,
             pattern: 'mystery',
             body: `On a cycloid bowl (tautochrone), steeper starts accelerate faster so every height finishes together.`,
           },
           {
-            title: `The Curve Where Higher Drops Never Lose Time`,
+            title: `Why Higher Drops Inside a Cycloid Never Lose Time`,
             hook: `Isochronous physics`,
             pattern: 'question',
             body: `Huygens' tautochrone curve equalizes travel time regardless of release height.`,
@@ -864,8 +930,8 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
             body: `Among ${subj.curvesCount ?? 4} paths, the longer cycloid drop builds speed early and wins cleanly.`,
           },
           {
-            title: `Can You Pick the Fastest Ramp Before Release?`,
-            hook: `Pick the fastest slide`,
+            title: `Variational Calculus Test: Which Descent Curve Wins?`,
+            hook: `Cycloid vs straight arc`,
             pattern: 'question',
             body: `The brachistochrone problem proves the shortest distance is not the fastest descent.`,
           },
@@ -881,34 +947,34 @@ function buildTitleAndHookPool(input: DiversifyMetadataInput, subj: ExtractedSub
 
   return [
     {
-      title: `Watch Code Reveal Hidden Symmetry: ${cleanSubject}`,
-      hook: `Hidden math symmetry`,
+      title: `Parametric Kinematics & Harmonic Mapping: ${cleanSubject}`,
+      hook: `Governing equations live`,
       pattern: 'statement',
-      body: `A clean mathematical rule unfolds frame-by-frame with synchronized audio cues.`,
+      body: `A clean mathematical rule unfolds frame-by-frame with synchronized ${voiceName} audio cues.`,
     },
     {
-      title: `Why Does ${cleanSubject} Produce This Exact Pattern? 📐`,
+      title: `Why Does ${cleanSubject} Produce This Exact Geometry? 📐`,
       hook: `Why this exact shape?`,
       pattern: 'question',
       body: `Small parameter steps transform simple equations into intricate geometric motion.`,
     },
     {
-      title: `Can You Predict the Final Shape? (${cleanSubject})`,
-      hook: `Predict the final curve`,
+      title: `Tracing Phase Closure Across ${cleanSubject}`,
+      hook: `Follow the phase closure`,
       pattern: 'challenge',
-      body: `Watch the trace evolve across the full cycle before the geometry closes cleanly.`,
+      body: `Trace the curve evolve across the full cycle before the geometry locks cleanly.`,
     },
     {
-      title: `1 Simple Equation, Mesmerizing Result: ${cleanSubject}`,
+      title: `1 Governing Equation, Continuous Symmetry: ${cleanSubject}`,
       hook: `One rule. Pure order.`,
       pattern: 'number-contrast',
-      body: `No keyframes or manual animation — purely numerical integration and harmonic tone mapping.`,
+      body: `Pure numerical integration and harmonic ${voiceName} tone mapping.`,
     },
     {
-      title: `The Most Hypnotic Way to See ${cleanSubject} ✨`,
-      hook: `Watch the pattern lock`,
+      title: `Inside the Phase Portrait of ${cleanSubject} ✨`,
+      hook: `Phase portrait study`,
       pattern: 'mystery',
-      body: `Watch closely near the climax as overlapping arcs lock into symmetry.`,
+      body: `Overlapping trajectories lock into symmetry near the climax of the ${dur}-second run.`,
     },
   ];
 }

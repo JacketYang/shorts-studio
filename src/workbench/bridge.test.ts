@@ -140,3 +140,29 @@ test('matchWorkbenchChannelStatus tracks available, scheduled, mediaReady, and p
   assert.equal(rebuilt.engine, sample.engine);
   assert.equal(rebuilt.seed, sample.seed);
 });
+
+test('workbench bridge extracts real distinct axes (music_piece, instrument, arena, rule, series=null) instead of hardcoded stubs', () => {
+  const recipes = buildCatalog();
+  const sampleIndices = [0, 1, 2, 100, 130, 155, 190];
+  const mapped = sampleIndices.map((idx) => {
+    const spec = recipes[idx].spec(0);
+    const scene = buildScene(spec);
+    return workbenchItemToStudioSpec(toWorkbenchEnqueueItem(spec, scene.duration), 'physics-music');
+  });
+
+  const instruments = new Set(mapped.map((m) => m.axes.instrument));
+  const musicPieces = new Set(mapped.map((m) => m.axes.music_piece));
+  const arenas = new Set(mapped.map((m) => m.axes.arena));
+  const rules = new Set(mapped.map((m) => m.axes.rule));
+  const palettes = new Set(mapped.map((m) => m.scene.style.palette.family));
+
+  assert.ok(instruments.size >= 3, `Expected >= 3 distinct instruments, got ${instruments.size}`);
+  assert.ok(musicPieces.size >= 4, `Expected >= 4 distinct music pieces, got ${musicPieces.size}`);
+  assert.ok(arenas.size >= 5, `Expected >= 5 distinct arenas, got ${arenas.size}`);
+  assert.ok(rules.size >= 5, `Expected >= 5 distinct rules, got ${rules.size}`);
+  assert.ok(palettes.size >= 2, `Expected >= 2 theme-derived palette families, got ${palettes.size}`);
+  for (const m of mapped) {
+    assert.equal(m.concept.series, null);
+  }
+});
+

@@ -1,34 +1,43 @@
-import type { AudioEvent, Builder, Ctx } from '../engine/types';
+import type { AudioEvent, Builder, Ctx, Theme } from '../engine/types';
 import { planNotes } from '../engine/music';
 import type { Plan } from '../engine/music';
-import { TAU, ball, clamp, easeOut, halo, hash, hsl, lastLE, lerp, rrect, text } from '../engine/util';
+import { TAU, ball, clamp, easeOut, halo, hash, hsl, lastLE, lerp, pal, rrect, text } from '../engine/util';
 
 function ranks(plan: Plan) {
   const fs = [...new Set(plan.notes.map((n) => Math.round(n.f * 100)))].sort((a, b) => a - b);
   return { n: fs.length, rankOf: (f: number) => fs.indexOf(Math.round(f * 100)) };
 }
 
-function labels(ctx: Ctx, plan: Plan, name: string, t: number, tt: number[], accent: string) {
-  text(ctx, '♪ ' + name, 540, 1650, 52, '#ffffff', { alpha: 0.85 });
+function noteColor(theme: Theme, i: number, total: number, glow = 0): string {
+  if (theme.style === 'bauhaus' || theme.style === 'paper') {
+    return pal(theme, i);
+  }
+  const k = total > 1 ? i / (total - 1) : 0.5;
+  const hue = (k * 290 + (theme.style === 'blueprint' ? 165 : theme.style === 'oscilloscope' ? 115 : 0)) % 360;
+  return hsl(hue, theme.isLight ? 74 : 82, theme.isLight ? 44 + glow * 12 : 48 + glow * 22);
+}
+
+function labels(ctx: Ctx, plan: Plan, name: string, t: number, tt: number[], theme: Theme) {
+  text(ctx, '♪ ' + name, 540, 1650, 50, theme.ink, { alpha: 0.88, weight: 700 });
   if (plan.rounds > 1 && plan.notes[plan.notes.length - 1].speed !== 1) {
     const k = Math.max(0, lastLE(tt, t));
     const nn = plan.notes[k];
-    text(ctx, `ROUND ${nn.round + 1}/${plan.rounds}  ·  ${nn.speed.toFixed(1)}× SPEED`, 540, 1575, 44, accent);
+    text(ctx, `ROUND ${nn.round + 1}/${plan.rounds}  ·  ${nn.speed.toFixed(1)}× SPEED`, 540, 1575, 42, theme.accentInk);
   }
 }
 
 /* ---------- 1. Ball hops across xylophone bars ---------- */
-export const buildHop: Builder = (_c, p) => {
-  const plan = planNotes(p.song, { target: p.target ?? 26, rounds: p.rounds, speedup: p.speedup });
+export const buildHop: Builder = (c, p) => {
+  const theme = c.theme;
+  const plan = planNotes(p.song, { target: p.target ?? 26, rounds: p.rounds, speedup: p.speedup, transpose: p.transpose ?? 0 });
   const { notes } = plan;
   const { n, rankOf } = ranks(plan);
   const R = p.ballR ?? 30;
-  const layout = p.layout as 'flat' | 'stairs' | 'arc';
-  interface Bar { x: number; y: number; a: number; len: number; w: number; hue: number; cx: number; cy: number }
+  const layout = (p.layout ?? 'flat') as 'flat' | 'stairs' | 'arc' | 'wave';
+  interface Bar { x: number; y: number; a: number; len: number; w: number; col: string; cx: number; cy: number }
   const bars: Bar[] = [];
   for (let i = 0; i < n; i++) {
     const k = n > 1 ? i / (n - 1) : 0.5;
-    const hue = k * 300;
     let x = 0, y = 0, a = 0, len = 0, w = 0;
     if (layout === 'arc') {
       a = ((-72 + 144 * k) * Math.PI) / 180;
@@ -41,9 +50,10 @@ export const buildHop: Builder = (_c, p) => {
       x = 80 + sp * (i + 0.5);
       w = Math.min(90, sp - 8);
       if (layout === 'flat') { y = 820; len = 640 - k * 400; }
+      else if (layout === 'wave') { y = 960 - Math.sin(k * Math.PI * 1.8) * 260; len = 1480 - y; }
       else { y = 1330 - k * 640; len = 1500 - y; }
     }
-    bars.push({ x, y, a, len, w, hue, cx: x + Math.sin(a) * R, cy: y - Math.cos(a) * R });
+    bars.push({ x, y, a, len, w, col: noteColor(theme, i, n), cx: x + Math.sin(a) * R, cy: y - Math.cos(a) * R });
   }
   const tt = notes.map((x) => x.t);
   const ctr = notes.map((x) => bars[rankOf(x.f)]);
@@ -56,7 +66,8 @@ export const buildHop: Builder = (_c, p) => {
     const lift = clamp(70 + 520 * T, 70, 420);
     return [lerp(ctr[k].cx, ctr[k + 1].cx, s), lerp(ctr[k].cy, ctr[k + 1].cy, s) - lift * 4 * s * (1 - s)];
   };
-  const audio: AudioEvent[] = notes.map((x) => ({ t: x.t, f: x.f, voice: 'marimba', v: 0.9, pan: (ctr[x.idx].x - 540) / 700 }));
+  const voice = p.voice ?? 'marimba';
+  const audio: AudioEvent[] = notes.map((x) => ({ t: x.t, f: x.f, voice, v: 0.9, pan: (ctr[x.idx].x - 540) / 700 }));
   const duration = plan.end + 1.4;
   return {
     duration,
@@ -78,11 +89,16 @@ export const buildHop: Builder = (_c, p) => {
         ctx.translate(b.x, b.y);
         ctx.rotate(b.a);
         ctx.translate(0, dep[i] * 12);
-        if (glow[i] > 0.05) halo(ctx, 0, 20, b.w * 1.6, hsl(b.hue, 100, 65), glow[i] * 0.8);
-        ctx.fillStyle = hsl(b.hue, 80, 42 + glow[i] * 26);
+        if (!theme.isLight && glow[i] > 0.05) halo(ctx, 0, 20, b.w * 1.4, b.col, glow[i] * 0.45);
+        ctx.fillStyle = glow[i] > 0.1 ? noteColor(theme, i, n, glow[i]) : b.col;
         rrect(ctx, -b.w / 2, 0, b.w, b.len, 14);
         ctx.fill();
-        ctx.fillStyle = hsl(b.hue, 100, 78, 0.55 + glow[i] * 0.4);
+        if (theme.isLight) {
+          ctx.strokeStyle = theme.muted;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.fillStyle = theme.isLight ? 'rgba(255,255,255,0.45)' : 'rgba(255,255,255,0.32)';
         rrect(ctx, -b.w / 2 + 4, 4, b.w - 8, 12, 6);
         ctx.fill();
         ctx.restore();
@@ -96,35 +112,42 @@ export const buildHop: Builder = (_c, p) => {
           const d = easeOut(dt / 0.6) * (70 + hash(j, s + 9) * 90);
           const px = b.x + Math.cos(ang) * d;
           const py = b.y + Math.sin(ang) * d;
-          ctx.fillStyle = hsl(b.hue, 100, 78, 1 - dt / 0.6);
+          ctx.save();
+          ctx.globalAlpha = 1 - dt / 0.6;
+          ctx.fillStyle = b.col;
           ctx.beginPath();
-          ctx.arc(px, py, 6 * (1 - dt / 0.6) + 1, 0, TAU);
+          ctx.arc(px, py, 5 * (1 - dt / 0.6) + 1.5, 0, TAU);
           ctx.fill();
+          ctx.restore();
         }
       }
-      const hue = ctr[Math.max(0, k)].hue;
-      for (let j = 10; j >= 1; j--) {
+      const ballCol = ctr[Math.max(0, k)].col;
+      for (let j = 9; j >= 1; j--) {
         const [x, y] = ballAt(Math.max(0, t - j * 0.022));
-        ctx.fillStyle = hsl(hue, 90, 70, 0.32 * (1 - j / 11));
+        ctx.save();
+        ctx.globalAlpha = (theme.isLight ? 0.18 : 0.28) * (1 - j / 10);
+        ctx.fillStyle = ballCol;
         ctx.beginPath();
         ctx.arc(x, y, R * (1 - j / 14), 0, TAU);
         ctx.fill();
+        ctx.restore();
       }
       const [bx, by] = ballAt(t);
       const sq = k >= 0 ? Math.max(0, 1 - (t - tt[k]) / 0.09) : 0;
       ctx.save();
       ctx.translate(bx, by + R * 0.2 * sq);
       ctx.scale(1 + 0.22 * sq, 1 - 0.22 * sq);
-      ball(ctx, 0, 0, R, hsl(hue, 90, 72));
+      ball(ctx, 0, 0, R, ballCol, 1.8, theme.isLight);
       ctx.restore();
-      labels(ctx, plan, p.song.name, t, tt, '#ffd166');
+      labels(ctx, plan, p.song.name, t, tt, theme);
     },
   };
 };
 
 /* ---------- 2. Rain of balls on piano-like keys ---------- */
-export const buildRain: Builder = (_c, p) => {
-  const plan = planNotes(p.song, { target: p.target ?? 26, rounds: p.rounds, speedup: p.speedup });
+export const buildRain: Builder = (c, p) => {
+  const theme = c.theme;
+  const plan = planNotes(p.song, { target: p.target ?? 26, rounds: p.rounds, speedup: p.speedup, transpose: p.transpose ?? 0 });
   const { notes } = plan;
   const { n, rankOf } = ranks(plan);
   const sp = 920 / n;
@@ -135,8 +158,8 @@ export const buildRain: Builder = (_c, p) => {
   const Tf = Math.min(p.fall ?? 0.9, 0.85);
   const hitY = 1240;
   const top = 340;
-  const hueOf = (i: number) => (n > 1 ? (i / (n - 1)) * 300 : 150);
-  const audio: AudioEvent[] = notes.map((x) => ({ t: x.t, f: x.f, voice: p.voice ?? 'bell', v: 0.85, pan: (xs[rankOf(x.f)] - 540) / 700 }));
+  const voice = p.voice ?? 'celesta';
+  const audio: AudioEvent[] = notes.map((x) => ({ t: x.t, f: x.f, voice, v: 0.85, pan: (xs[rankOf(x.f)] - 540) / 700 }));
   return {
     duration: plan.end + 1.4,
     audio,
@@ -149,16 +172,23 @@ export const buildRain: Builder = (_c, p) => {
         if (dt >= 0) glow[rankOf(notes[j].f)] = Math.max(glow[rankOf(notes[j].f)], 1 - dt / 0.6);
       }
       for (let i = 0; i < n; i++) {
-        const g = ctx.createLinearGradient(0, top, 0, hitY);
-        g.addColorStop(0, hsl(hueOf(i), 90, 60, 0));
-        g.addColorStop(1, hsl(hueOf(i), 90, 60, 0.22));
-        ctx.fillStyle = g;
+        const baseCol = noteColor(theme, i, n, glow[i]);
+        ctx.save();
+        ctx.globalAlpha = theme.isLight ? 0.08 : 0.14;
+        ctx.fillStyle = baseCol;
         ctx.fillRect(xs[i] - kw / 2, top, kw, hitY - top);
-        if (glow[i] > 0) halo(ctx, xs[i], hitY, kw * 1.4, hsl(hueOf(i), 100, 65), glow[i]);
-        ctx.fillStyle = hsl(hueOf(i), 75, 38 + glow[i] * 32);
-        rrect(ctx, xs[i] - kw / 2, hitY + 6, kw, 270 + glow[i] * 0, 16);
+        ctx.restore();
+
+        if (!theme.isLight && glow[i] > 0) halo(ctx, xs[i], hitY, kw * 1.2, baseCol, glow[i] * 0.6);
+        ctx.fillStyle = baseCol;
+        rrect(ctx, xs[i] - kw / 2, hitY + 6, kw, 270, 16);
         ctx.fill();
-        ctx.fillStyle = hsl(hueOf(i), 100, 85, 0.5 + glow[i] * 0.4);
+        if (theme.isLight) {
+          ctx.strokeStyle = theme.muted;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(255,255,255,0.42)';
         rrect(ctx, xs[i] - kw / 2 + 4, hitY + 10, kw - 8, 12, 6);
         ctx.fill();
       }
@@ -166,34 +196,35 @@ export const buildRain: Builder = (_c, p) => {
         const dt = t - tt[j];
         if (dt > 0.85) break;
         const r = rankOf(notes[j].f);
-        const col = hsl(hueOf(r), 95, 68);
+        const col = noteColor(theme, r, n);
         let y: number;
         let alpha = 1;
         if (dt < 0) {
           const s = (t - (tt[j] - Tf)) / Tf;
           y = lerp(top, hitY - R, s * s);
-          const g = ctx.createLinearGradient(0, y - 120 * s, 0, y);
-          g.addColorStop(0, hsl(hueOf(r), 95, 68, 0));
-          g.addColorStop(1, hsl(hueOf(r), 95, 68, 0.5));
-          ctx.fillStyle = g;
-          ctx.fillRect(xs[r] - R * 0.7, y - 120 * s, R * 1.4, 120 * s);
+          ctx.save();
+          ctx.globalAlpha = theme.isLight ? 0.16 : 0.28;
+          ctx.fillStyle = col;
+          ctx.fillRect(xs[r] - R * 0.55, y - 110 * s, R * 1.1, 110 * s);
+          ctx.restore();
         } else {
           const u = clamp(dt / 0.4, 0, 1);
           y = hitY - R - 4 * 55 * u * (1 - u);
           alpha = 1 - clamp((dt - 0.35) / 0.45, 0, 1);
         }
         ctx.globalAlpha = alpha;
-        ball(ctx, xs[r], y, R, col, 2);
+        ball(ctx, xs[r], y, R, col, 1.8, theme.isLight);
         ctx.globalAlpha = 1;
       }
-      labels(ctx, plan, p.song.name, t, tt, '#ffd166');
+      labels(ctx, plan, p.song.name, t, tt, theme);
     },
   };
 };
 
 /* ---------- 3. Ball inside a ring draws a star while playing ---------- */
-export const buildRing: Builder = (_c, p) => {
-  const plan = planNotes(p.song, { target: p.target ?? 26, rounds: p.rounds, speedup: p.speedup });
+export const buildRing: Builder = (c, p) => {
+  const theme = c.theme;
+  const plan = planNotes(p.song, { target: p.target ?? 26, rounds: p.rounds, speedup: p.speedup, transpose: p.transpose ?? 0 });
   const { notes } = plan;
   const CX = 540, CY = 900, RR = 420;
   const step = (TAU * p.k) / p.m + (p.drift ?? 0);
@@ -209,32 +240,36 @@ export const buildRing: Builder = (_c, p) => {
     const s = (t - tt[k]) / (tt[k + 1] - tt[k]);
     return [lerp(P[k].x, P[k + 1].x, s), lerp(P[k].y, P[k + 1].y, s)];
   };
-  const audio: AudioEvent[] = notes.map((x, j) => ({ t: x.t, f: x.f, voice: p.voice ?? 'bell', v: 0.85, pan: (P[j].x - CX) / 600 }));
+  const voice = p.voice ?? 'kalimba';
+  const audio: AudioEvent[] = notes.map((x, j) => ({ t: x.t, f: x.f, voice, v: 0.85, pan: (P[j].x - CX) / 600 }));
   return {
     duration: plan.end + 1.6,
     audio,
     draw(ctx, t) {
       const k = lastLE(tt, t);
-      halo(ctx, CX, CY, RR * 1.15, '#ffffff', 0.05);
+      if (!theme.isLight) halo(ctx, CX, CY, RR * 1.1, theme.ink, 0.04);
       ctx.lineCap = 'round';
       ctx.lineWidth = 3.5;
       for (let j = 0; j < k; j++) {
-        ctx.strokeStyle = hsl(j * 9, 90, 65, 0.5);
+        ctx.save();
+        ctx.globalAlpha = theme.isLight ? 0.6 : 0.5;
+        ctx.strokeStyle = noteColor(theme, j, Math.max(12, notes.length % 24 || 12));
         ctx.beginPath();
         ctx.moveTo(P[j].x, P[j].y);
         ctx.lineTo(P[j + 1].x, P[j + 1].y);
         ctx.stroke();
+        ctx.restore();
       }
       const [bx, by] = pos(t);
       if (k >= 0) {
-        ctx.strokeStyle = hsl(k * 9, 95, 72, 0.9);
+        ctx.strokeStyle = noteColor(theme, k, 12);
         ctx.lineWidth = 5;
         ctx.beginPath();
         ctx.moveTo(P[k].x, P[k].y);
         ctx.lineTo(bx, by);
         ctx.stroke();
       }
-      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.strokeStyle = theme.muted;
       ctx.lineWidth = 8;
       ctx.beginPath();
       ctx.arc(CX, CY, RR + 12, 0, TAU);
@@ -243,32 +278,37 @@ export const buildRing: Builder = (_c, p) => {
         const dt = t - tt[j];
         if (dt > 0.55) break;
         const f = 1 - dt / 0.55;
-        ctx.strokeStyle = hsl(j * 9, 100, 70, f);
-        ctx.lineWidth = 8 + 16 * f;
+        const col = noteColor(theme, j, 12);
+        ctx.save();
+        ctx.globalAlpha = f;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 8 + 14 * f;
         ctx.beginPath();
         ctx.arc(CX, CY, RR + 12, P[j].a - 0.13, P[j].a + 0.13);
         ctx.stroke();
-        ctx.strokeStyle = hsl(j * 9, 100, 80, f * 0.7);
+        ctx.globalAlpha = f * 0.65;
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(P[j].x, P[j].y, 20 + 70 * easeOut(dt / 0.55), 0, TAU);
+        ctx.arc(P[j].x, P[j].y, 20 + 68 * easeOut(dt / 0.55), 0, TAU);
         ctx.stroke();
+        ctx.restore();
       }
-      ball(ctx, bx, by, 26, hsl(Math.max(0, k) * 9, 90, 75));
-      labels(ctx, plan, p.song.name, t, tt, '#ffd166');
+      ball(ctx, bx, by, 26, noteColor(theme, Math.max(0, k), 12), 1.8, theme.isLight);
+      labels(ctx, plan, p.song.name, t, tt, theme);
     },
   };
 };
 
 /* ---------- 4. Every bounce adds a ball (and a note) ---------- */
 export const buildMultiply: Builder = (c, p) => {
+  const theme = c.theme;
   const D: number = p.duration ?? 26;
   const cap: number = p.cap ?? 70;
   const g: number = p.gravity ?? 0;
   const R0 = 430, CX = 540, CY = 900;
   const br: number = p.ballR ?? 19;
   const speed: number = p.speed ?? 650;
-  const plan = planNotes(p.song, { target: 26, rounds: 1 });
+  const plan = planNotes(p.song, { target: 26, rounds: 1, transpose: p.transpose ?? 0 });
   const fs = plan.notes.map((n) => n.f);
   const rng = c.rng;
   const dt = 1 / 240;
@@ -282,6 +322,7 @@ export const buildMultiply: Builder = (c, p) => {
   const hitsT: number[] = [];
   const hitsA: number[] = [];
   const audio: AudioEvent[] = [];
+  const voice = p.voice ?? 'rhodes';
   const gap = (D * 0.8) / (cap - 1);
   let lastSpawn = -1, lastSound = -1, hi = 0;
   for (let i = 0; i <= steps; i++) {
@@ -314,7 +355,7 @@ export const buildMultiply: Builder = (c, p) => {
           hitsT.push(t);
           hitsA.push(Math.atan2(ny, nx));
           if (t - lastSound >= 0.05) {
-            audio.push({ t, f: fs[hi % fs.length], voice: 'marimba', v: 0.7, pan: nx * 0.6 });
+            audio.push({ t, f: fs[hi % fs.length], voice, v: 0.72, pan: nx * 0.6 });
             hi++;
             lastSound = t;
           }
@@ -335,7 +376,7 @@ export const buildMultiply: Builder = (c, p) => {
       const count = cur.length / 2;
       const hk = lastLE(hitsT, t);
       ctx.lineWidth = 6;
-      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.strokeStyle = theme.muted;
       ctx.beginPath();
       ctx.arc(CX, CY, R0 + 8, 0, TAU);
       ctx.stroke();
@@ -343,28 +384,34 @@ export const buildMultiply: Builder = (c, p) => {
         const age = t - hitsT[j];
         if (age > 0.35) break;
         const fa = 1 - age / 0.35;
-        ctx.strokeStyle = hsl(hitsA[j] * 57, 100, 70, fa);
-        ctx.lineWidth = 6 + 12 * fa;
+        ctx.save();
+        ctx.globalAlpha = fa;
+        ctx.strokeStyle = noteColor(theme, Math.round((hitsA[j] + Math.PI) * 3), 12);
+        ctx.lineWidth = 6 + 10 * fa;
         ctx.beginPath();
         ctx.arc(CX, CY, R0 + 8, hitsA[j] - 0.06, hitsA[j] + 0.06);
         ctx.stroke();
+        ctx.restore();
       }
       ctx.lineCap = 'round';
       for (let tr = 1; tr <= 4; tr++) {
         const pf = frames[Math.max(0, f - tr)];
-        ctx.lineWidth = br * 1.2 * (1 - tr / 5);
+        ctx.lineWidth = br * 1.15 * (1 - tr / 5);
         for (let b = 0; b < Math.min(count, pf.length / 2); b++) {
-          ctx.strokeStyle = hsl(b * 47, 90, 65, 0.16);
+          ctx.save();
+          ctx.globalAlpha = theme.isLight ? 0.14 : 0.2;
+          ctx.strokeStyle = noteColor(theme, b, 12);
           ctx.beginPath();
           ctx.moveTo(pf[b * 2], pf[b * 2 + 1]);
           ctx.lineTo(cur[b * 2], cur[b * 2 + 1]);
           ctx.stroke();
+          ctx.restore();
         }
       }
-      for (let b = 0; b < count; b++) ball(ctx, cur[b * 2], cur[b * 2 + 1], br, hsl(b * 47, 90, 66), 1.8);
-      text(ctx, '×' + count, 540, 1470, 170, '#ffffff', { alpha: 0.95 });
-      text(ctx, 'BALLS', 540, 1590, 48, '#ffd166');
-      text(ctx, '♪ ' + p.song.name, 540, 1690, 44, '#ffffff', { alpha: 0.7 });
+      for (let b = 0; b < count; b++) ball(ctx, cur[b * 2], cur[b * 2 + 1], br, noteColor(theme, b, 12), 1.6, theme.isLight);
+      text(ctx, '×' + count, 540, 1470, 165, theme.ink, { alpha: 0.95 });
+      text(ctx, 'BALLS', 540, 1590, 44, theme.accentInk);
+      text(ctx, '♪ ' + p.song.name, 540, 1690, 42, theme.subInk, { weight: 600 });
     },
   };
 };
